@@ -1,0 +1,321 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ⚠️ DO NOT CHANGE THIS LINE MANUALLY
+// Managed by scripts/syncPrismaProvider.ts
+datasource db {
+  provider = "postgresql"
+}
+
+model Cluster {
+  id         String        @id @default(cuid())
+  name       String        @unique
+  namespace  String
+  tokenHash  String
+  status     ClusterStatus @default(PENDING)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  lastSeenAt DateTime?
+
+  kagentVersion String?
+  kagentConfig  Json?
+
+  socketId String? @unique
+
+  events    Event[]
+  agentRuns AgentRun[]
+
+  @@index([status])
+  @@index([lastSeenAt])
+  @@map("clusters")
+}
+
+enum ClusterStatus {
+  PENDING
+  ACTIVE
+  INACTIVE
+  FAILED
+}
+
+model Event {
+  id         String    @id @default(cuid())
+  agentId    String?
+  clusterId  String
+  type       EventType
+  payload    Json
+  receivedAt DateTime  @default(now())
+
+  cluster Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@index([clusterId, receivedAt(sort: Desc)])
+  @@index([type, receivedAt(sort: Desc)])
+  @@map("events")
+}
+
+enum EventType {
+  CLUSTER_ERROR
+  AGENT_TRACE
+  AGENT_FAILED
+  AGENT_DEPLOYED
+  AGENT_EVENT
+  K8S_EVENT
+  K8S_POD_STATUS
+  OTEL_TRACE
+  OTEL_METRIC
+  INVOKE_RESPONSE
+  INVOKE_ERROR
+}
+
+/// Represents a Terra agent definition and its lifecycle
+model Agent {
+  id        String      @id @default(uuid())
+  name      String
+  clusterId String
+  status    AgentStatus @default(PENDING)
+
+  // Agent definitions
+  terraDefinition Json // Original Terra YAML as JSON
+  kagentCrd       Json? // Generated Kagent CRD as JSON
+
+  // Runtime configuration
+  image    String // Container image
+  replicas Int    @default(1)
+
+  // Resource limits (stored for quick access)
+  cpuRequest    String?
+  cpuLimit      String?
+  memoryRequest String?
+  memoryLimit   String?
+
+  // Deployment tracking
+  deploymentId String?   @unique
+  deployedAt   DateTime?
+
+  // Error tracking
+  error      String? // Last error message
+  errorCount Int     @default(0)
+
+  // Metadata
+  description String?
+  labels      Json?
+  annotations Json?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  //cluster           Cluster     @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  //runs              AgentRun[]
+  //events            Event[]
+
+  @@unique([clusterId, name])
+  @@index([clusterId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("agents")
+}
+
+/// Agent lifecycle status tracking
+enum AgentStatus {
+  PENDING // Agent definition created, awaiting validation
+  VALIDATING // Structure and semantic validation in progress
+  CONVERTING // Converting Terra definition to Kagent CRD
+  DEPLOYING // Sending to cluster via mediator
+  ACTIVE // Successfully deployed and running
+  FAILED // Deployment or validation failed
+  UPDATING // Agent definition being updated
+  DELETING // Agent deletion in progress
+  DELETED // Agent successfully deleted
+}
+
+model AgentRun {
+  id          String         @id @default(cuid())
+  clusterId   String
+  agentName   String
+  requestId   String         @unique
+  input       Json
+  parameters  Json?
+  status      AgentRunStatus @default(PENDING)
+  result      Json?
+  error       String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  completedAt DateTime?
+
+  cluster Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@index([clusterId, status])
+  @@index([requestId])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("agent_runs")
+}
+
+enum AgentRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMEOUT
+}
+
+model Job {
+  id           String    @id @default(cuid())
+  type         JobType
+  payload      Json
+  status       JobStatus @default(PENDING)
+  attempts     Int       @default(0)
+  maxAttempts  Int       @default(3)
+  error        String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  scheduledFor DateTime?
+  startedAt    DateTime?
+  completedAt  DateTime?
+
+  @@index([status, scheduledFor])
+  @@index([type, status])
+  @@map("jobs")
+}
+
+enum JobType {
+  CLUSTER_REGISTRATION
+  AGENT_INVOCATION
+  CLUSTER_HEALTH_CHECK
+  EVENT_CLEANUP
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  RETRYING
+}
+
+// ============================================================================
+// WORKFLOW ORCHESTRATION MODELS
+// ============================================================================
+
+/// Workflow state machine states
+/// Each state represents a deterministic checkpoint in the orchestration loop
+enum WorkflowStatus {
+  CREATED // Initial state when workflow is created
+  WAITING_ON_PLANNER // Waiting for LangGraph planning response
+  WAITING_ON_POLICY // Waiting for OPA policy decision
+  WAITING_ON_AGENT // Waiting for agent execution to complete
+  WAITING_ON_HUMAN // Human-in-the-loop approval required
+  PAUSED // Workflow manually paused
+  COMPLETED // Goal achieved successfully
+  FAILED // Workflow failed
+}
+
+/// Main workflow record
+/// Represents a single execution of Terra's orchestration engine from goal to completion
+model Workflow {
+  id      String @id @default(uuid())
+  goal    String // Natural language goal submitted by user
+  context String @default("") // added context to goal
+
+  // OpenTelemetry tracing
+  traceId    String  @unique // Trace ID for distributed tracing
+  rootSpanId String? // Root span for this workflow
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  startedAt   DateTime? // When workflow transitioned to RUNNING
+  completedAt DateTime? // When workflow completed or failed
+  status      WorkflowStatus @default(CREATED)
+
+  // Relations
+  history WorkflowHistory[]
+  state   WorkflowState?
+  plan    WorkflowPlan?
+
+  @@index([status])
+  @@index([traceId])
+  @@index([createdAt])
+  @@map("workflows")
+}
+
+/// Append-only workflow history for deterministic replay
+/// Every state transition is recorded with full context
+model WorkflowHistory {
+  id         String @id @default(uuid())
+  workflowId String
+  sequence   Int // Monotonic sequence number for ordering
+
+  // State transition
+  previousStatus WorkflowStatus?
+  newStatus      WorkflowStatus
+
+  // Event that triggered this transition
+  eventType String // e.g., "workflow.created", "policy.evaluated"
+  eventData Json? // Full event payload for replay
+
+  // Decision record
+  reason         String? // Human-readable reason for transition
+  decision       String? // Decision made (e.g., "route_to_agent")
+  decisionInput  Json? // Input to decision
+  decisionOutput Json? // Output from decision
+
+  // OpenTelemetry tracing
+  spanId String? // Span ID for this history entry
+
+  // Timestamp
+  timestamp DateTime @default(now())
+
+  // Relation
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, sequence])
+  @@index([workflowId, timestamp])
+  @@index([eventType])
+  @@map("workflow_history")
+}
+
+/// Current workflow state snapshot
+/// Stores mutable execution state separate from history
+model WorkflowState {
+  id         String @id @default(uuid())
+  workflowId String @unique
+
+  retryCount Int @default(0)
+  maxRetries Int @default(3)
+
+  // Error tracking
+  errors     String[] // Accumulated errors
+  errorCount Int      @default(0)
+
+  // Current execution state
+  lastAgentResult Json? // Last agent execution result
+  execContext     Json  @default("{}") // Accumulated execution context
+
+  // Execution tracking
+  currentStep Int @default(0)
+
+  // Replay support - last applied history sequence
+  lastHistorySeq Int @default(0)
+
+  // Optimistic locking
+  tick Int @default(1)
+
+  // Timestamps
+  updatedAt DateTime @updatedAt
+  workflow  Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@map("workflow_states")
+}
+
+model WorkflowPlan {
+  id         String   @id @default(uuid())
+  workflow   Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  workflowId String   @unique
+  plan       Json
+}
+
