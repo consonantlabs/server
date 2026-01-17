@@ -1,3 +1,4 @@
+// @ts-ignore
 import { Server as SocketIOServer } from 'socket.io';
 import { EventEmitter } from 'events';
 import { TelemetryEvent } from './types.js';
@@ -25,10 +26,10 @@ export class TelemetryRouter extends EventEmitter {
     super();
     this.uiNamespace = this.io.of('/telemetry');
     this.setupUINamespace();
-    
-    if (observabilityConfig?.enabled && observabilityConfig.endpoint) {
+
+    if (this.observabilityConfig?.enabled && this.observabilityConfig.endpoint) {
       this.externalForwarder = new ExternalTelemetryForwarder(
-        observabilityConfig,
+        this.observabilityConfig,
         logger
       );
     }
@@ -38,11 +39,11 @@ export class TelemetryRouter extends EventEmitter {
     this.uiNamespace.on('connection', (socket: any) => {
       logger.info({
         socketId: socket.id
-      },'UI client connected to telemetry stream');
+      }, 'UI client connected to telemetry stream');
 
       socket.on('subscribe', (data: { clusterId: string; filters?: any }) => {
         socket.join(`cluster:${data.clusterId}`);
-        logger.info( {
+        logger.info({
           clusterId: data.clusterId,
           socketId: socket.id,
         }, 'UI subscribed to cluster telemetry');
@@ -58,7 +59,7 @@ export class TelemetryRouter extends EventEmitter {
         socket.leave(`cluster:${data.clusterId}`);
         logger.info({
           clusterId: data.clusterId,
-        },'UI unsubscribed from cluster telemetry');
+        }, 'UI unsubscribed from cluster telemetry');
       });
 
       socket.on('disconnect', () => {
@@ -98,11 +99,11 @@ export class TelemetryRouter extends EventEmitter {
       } else {
         const buffer = this.eventBuffer.get(clusterId) || [];
         buffer.push(...clusterEvents);
-        
+
         if (buffer.length > 1000) {
           buffer.splice(0, buffer.length - 1000);
         }
-        
+
         this.eventBuffer.set(clusterId, buffer);
       }
     }
@@ -117,7 +118,7 @@ export class TelemetryRouter extends EventEmitter {
       await this.externalForwarder.forward(events);
       logger.debug(`Forwarded ${events.length} events to external collector`);
     } catch (error) {
-      logger.error({error}, 'Failed to forward events to external collector');
+      logger.error({ error }, 'Failed to forward events to external collector');
       this.emit('forward:error', error);
     }
   }
@@ -132,7 +133,7 @@ export class TelemetryRouter extends EventEmitter {
       logger.info({
         provider: config.provider,
         endpoint: config.endpoint,
-      },'External telemetry forwarder updated');
+      }, 'External telemetry forwarder updated');
     } else {
       if (this.externalForwarder) {
         await this.externalForwarder.shutdown();
@@ -202,7 +203,7 @@ class ExternalTelemetryForwarder {
 
   private async send(events: TelemetryEvent[]): Promise<void> {
     const controller = new AbortController();
-const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+    setTimeout(() => controller.abort(), 10000); // 10s timeout
     const payload = this.transformForProvider(events);
 
     const response = await fetch(this.config.endpoint!, {
@@ -324,7 +325,7 @@ const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
 
   private startFlushTimer(): void {
     this.flushTimer = setInterval(() => {
-      this.flush().catch(err => 
+      this.flush().catch(err =>
         this.logger.error('Flush timer error', err)
       );
     }, this.flushInterval);

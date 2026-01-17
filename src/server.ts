@@ -1,412 +1,434 @@
+/**
+ * @fileoverview Main Server Entry Point
+ * @module server
+ * 
+ * This is the main entry point for the Consonant Control Plane server.
+ * It initializes and coordinates all services:
+ * - Fastify HTTP server (REST API)
+ * - gRPC server (cluster streaming)
+ * - Database (Prisma with multi-database support)
+ * - Redis (rate limiting and caching)
+ * - OpenTelemetry (distributed tracing)
+ * - Inngest (event-driven workflows)
+ * 
+ * Startup sequence:
+ * 1. Initialize OpenTelemetry SDK
+ * 2. Load and validate configuration
+ * 3. Connect to database
+ * 4. Connect to Redis
+ * 5. Initialize gRPC server
+ * 6. Register Fastify plugins and routes
+ * 7. Start HTTP and gRPC servers
+ * 8. Set up graceful shutdown handlers
+ */
+
 import Fastify, { FastifyInstance } from 'fastify';
 import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
-import rateLimit from '@fastify/rate-limit';
 import compress from '@fastify/compress';
 import closeWithGrace from 'close-with-grace';
-import { createServer } from 'http';
-// import { RedisService } from './redis-service';
-import { prismaManager, dbPlugin } from './services/db/index.js';
-import { clusterRoutes } from './routes/clusters.route.js';
-import { contextManager } from './utils/context.js';
-import { generateUUID } from './utils/crypto.js';
-import { initializeOrchestrator } from './services/orchestrator/engine.js';
-// import { createGrpcServer, GrpcServer } from './services/grpc/server.js';
 import { serve } from 'inngest/fastify';
+
+import { env, isDevelopment } from './config/env.js';
+import { API_PATHS, TIMEOUTS } from './config/constants.js';
+import { logger, flushLogger } from './utils/logger.js';
+import { contextManager } from './utils/context.js';
+import { generateUUID, generateTraceId } from './utils/crypto.js';
+import { prismaManager } from './services/db/manager.js';
+import { redisClient } from './services/redis/client.js';
 import { inngest } from './services/inngest/client.js';
-import * as inngestFunctions from './services/inngest/functions/registry.js';
-import { agentRoutes } from './routes/agents.route.js';
+import { allFunctions } from './services/inngest/functions/registry.js';
+import { startGrpcServer } from './services/grpc/server.js';
+import { initWorkQueue } from './services/redis/queue.js';
 
+let grpcServer: any;
 
-// ============================================================================
-// Server Configuration
-// ============================================================================
-const PORT = Number(process.env.PORT) || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
-const IS_PROD = process.env.NODE_ENV === 'production';
-const UUID = generateUUID()
+/**
+ * Create and configure Fastify instance.
+ * 
+ * Fastify is configured with:
+ * - Structured logging (Pino)
+ * - Request ID generation
+ * - Trust proxy headers
+ * - Production-grade timeouts
+ */
+function createFastifyServer(): FastifyInstance {
+  return Fastify({
+    logger,
+    disableRequestLogging: false,
+    trustProxy: true,
+    requestIdHeader: 'x-request-id',
+    requestIdLogLabel: 'reqId',
 
+    // Request timeouts
+    connectionTimeout: TIMEOUTS.REQUEST_MS,
+    keepAliveTimeout: TIMEOUTS.REQUEST_MS,
 
-// gRPC Server Configuration
-const GRPC_PORT = Number(process.env.GRPC_PORT) || 50051;
-const GRPC_HOST = process.env.GRPC_HOST || '0.0.0.0';
-const GRPC_TLS_ENABLED = process.env.GRPC_TLS_ENABLED === 'true';
-const GRPC_TLS_CERT = process.env.GRPC_TLS_CERT;
-const GRPC_TLS_KEY = process.env.GRPC_TLS_KEY;
+    // Body size limits
+    bodyLimit: 10 * 1024 * 1024, // 10MB
 
+    // Generate unique request IDs
+    genReqId: () => generateUUID(),
+  });
+}
 
-const app: FastifyInstance = Fastify({
-  logger: {
-    level: IS_PROD ? 'info' : 'debug',
-    transport: !IS_PROD
-      ? {
-        target: 'pino-pretty',
-        options: {
-          colorize: true,
-          translateTime: 'HH:MM:ss Z',
-          ignore: 'pid,hostname',
-        },
-      }
-      : undefined,
-  },
-  disableRequestLogging: false,
-  trustProxy: true,
-  requestIdHeader: 'x-request-id',
-  requestIdLogLabel: 'reqId',
-});
+/**
+ * Initialize OpenTelemetry instrumentation.
+ * 
+ * This must run BEFORE any other imports to ensure all modules
+ * are properly instrumented.
+ * 
+ * Note: In production, this would be in a separate file imported
+ * at the very top of server.ts using --require or --import flag.
+ */
+async function initializeOpenTelemetry(): Promise<void> {
+  if (!env.OTEL_ENABLED) {
+    logger.info('OpenTelemetry disabled');
+    return;
+  }
 
-// ============================================================================
-// Service Instances
-// ============================================================================
+  logger.info('Initializing OpenTelemetry...');
 
-// let redis: RedisService;
-// let grpcServer: GrpcServer | null = null
+  const { initializeOpenTelemetry: initOtel } = await import('./services/opentelemetry/tracer.js');
+  initOtel();
 
+  logger.info('OpenTelemetry initialized');
+}
 
+/**
+ * Initialize all backend services.
+ * 
+ * Services are initialized in dependency order:
+ * 1. Database (required by everything)
+ * 2. Redis (required by rate limiting)
+ * 3. Other services
+ */
+async function initializeServices(app: FastifyInstance): Promise<void> {
+  logger.info('Initializing services...');
 
-// ============================================================================
-// Service Setup Functions
-// ============================================================================
-
-
-const setupServices = async () => {
-  app.log.info('[Server] 🚀 Initializing services...');
-
-  // Initialize database
+  // 1. Initialize database
   await prismaManager.initialize(app.log);
+  logger.info('✓ Database initialized');
 
-  // Initialize orchestrator
-  await initializeOrchestrator();
+  // 2. Initialize Redis
+  await redisClient.connect();
+  logger.info('✓ Redis connected');
 
-  
-};
- 
+  // 3. Initialize Work Queue
+  const { initWorkQueue } = await import('./services/redis/queue.js');
+  initWorkQueue(redisClient.getClient());
+  logger.info('✓ Work queue initialized');
 
-const setupPlugins = async (server: FastifyInstance) => {
-  app.log.info('[Server] 🔌 Registering plugins...');
+  // 4. Initialize Agent Registry
+  const { initAgentRegistry } = await import('./services/agent-registry.js');
+  initAgentRegistry(await prismaManager.getClient());
+  logger.info('✓ Agent registry initialized');
 
-  // Security
-  await server.register(helmet, {
-    contentSecurityPolicy: false, // Disable for development
+  // 5. Initialize Cluster Selection
+  const { initClusterSelection } = await import('./services/cluster-selection.js');
+  initClusterSelection(await prismaManager.getClient());
+  logger.info('✓ Cluster selection initialized');
+
+  // 6. Initialize API Key Service
+  const { initApiKeyService } = await import('./services/api-key.service.js');
+  initApiKeyService(await prismaManager.getClient());
+  logger.info('✓ API Key Service initialized');
+
+  logger.info('✓ All services initialized');
+}
+
+/**
+ * Register Fastify plugins.
+ * 
+ * Plugins are registered in a specific order to ensure
+ * correct execution of hooks.
+ */
+async function registerPlugins(app: FastifyInstance): Promise<void> {
+  logger.info('Registering Fastify plugins...');
+
+  // Security headers
+  await app.register(helmet, {
+    contentSecurityPolicy: isDevelopment() ? false : undefined,
   });
 
   // CORS
-  await server.register(cors, {
-    origin: process.env.CORS_ORIGIN || '*',
+  await app.register(cors, {
+    origin: env.CORS_ORIGIN,
     credentials: true,
   });
 
   // Compression
-  await server.register(compress, {
+  await app.register(compress, {
     global: true,
     encodings: ['gzip', 'deflate'],
   });
 
-  // Database plugin
-  await server.register(dbPlugin);
-
-  //   await server.register(rateLimit, {
-  //     max: 100,
-  //     timeWindow: '1 minute',
-  //     redis: redis.getClient(),
-  //   });
-  app.log.info('[Server] ✓ Plugins registered');
-};
-
-
-export async function registerEndpoint(app: FastifyInstance) {
-  await app.register(clusterRoutes, {
-    prefix: '/api/v1',
-  });
-
-  await app.register(agentRoutes, { 
-    prefix: '/api/v1' 
-  });
-
-
-  // Register Inngest endpoint
-  app.all(
-    '/api/inngest',
-    serve({
-      client: inngest,
-      functions: inngestFunctions.allFunctions,
-    })
- );
+  logger.info('✓ Plugins registered');
 }
 
+/**
+ * Register API routes.
+ * 
+ * Routes are organized by resource and mounted under /api/v1.
+ */
+async function registerRoutes(app: FastifyInstance): Promise<void> {
+  logger.info('Registering routes...');
 
-app.addHook('onRequest', (request, reply, done) => {
-  const traceId = (request.headers['x-trace-id'] as string) || UUID;
-  const requestId = request.id as string;
+  // Health check endpoints (no prefix)
+  app.get(API_PATHS.HEALTH, async () => {
+    return {
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      version: env.OTEL_SERVICE_VERSION,
+    };
+  });
 
-  // We wrap the rest of the request lifecycle in this context
-  contextManager.run({
-    traceId,
-    requestId,
-    startTime: Date.now()
-  }, () => {
-    // Calling done() here means all subsequent hooks (preHandler, onResponse) 
-    // and your route handler will stay inside this context.
+  app.get(API_PATHS.HEALTH_DB, async () => {
+    try {
+      const client = await prismaManager.getClient();
+      await client.$queryRaw`SELECT 1`;
+
+      return {
+        status: 'healthy',
+        database: {
+          connected: true,
+          url: prismaManager.getCurrentDatabaseUrl(),
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'unhealthy',
+        database: {
+          connected: false,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        },
+        timestamp: new Date().toISOString(),
+      };
+    }
+  });
+
+  // Inngest endpoint
+  app.all(
+    API_PATHS.INNGEST,
+    serve({
+      client: inngest,
+      functions: allFunctions,
+    })
+  );
+
+  // Register Prisma plugin for database access
+  logger.info('Registering Prisma plugin...');
+  const prismaPlugin = await import('./plugins/prisma.plugin.js');
+  await app.register(prismaPlugin.default);
+
+  // Register request timeline tracking plugin
+  logger.info('Registering request timeline plugin...');
+  const timelinePlugin = await import('./plugins/request-timeline.plugin.js');
+  await app.register(timelinePlugin.default);
+
+  // Register API routes
+  const { registerRoutes } = await import('./routes/index.js');
+  await registerRoutes(app);
+
+  logger.info('✓ Routes registered');
+}
+
+/**
+ * Set up request context injection.
+ * 
+ * This hook runs on every request and creates an execution context
+ * with trace ID, request ID, etc. The context automatically
+ * propagates through all async operations.
+ */
+function setupContextInjection(app: FastifyInstance): void {
+  app.addHook('onRequest', (request, reply, done) => {
+    const traceId = (request.headers['x-trace-id'] as string) || generateTraceId();
+    const requestId = request.id;
+
+    // Create execution context
+    contextManager.run({
+      traceId,
+      requestId,
+      startTime: Date.now(),
+    }, () => {
+      // All subsequent hooks and handlers run within this context
+      done();
+    });
+  });
+
+  logger.info('✓ Context injection configured');
+}
+
+/**
+ * Set up response logging.
+ * 
+ * Logs all requests with timing information and includes
+ * context metadata (trace ID, request ID, etc.).
+ */
+function setupResponseLogging(app: FastifyInstance): void {
+  app.addHook('onResponse', (request, reply, done) => {
+    const duration = reply.elapsedTime;
+
+    request.log.info({
+      method: request.method,
+      url: request.url,
+      statusCode: reply.statusCode,
+      durationMs: duration.toFixed(2),
+      // Context is automatically injected by logger mixin
+    }, 'Request completed');
+
     done();
   });
-});
 
-// ============================================================================
-// Response Logging Hook
-// ============================================================================
-
-app.addHook('onResponse', (request, reply, done) => {
-  // Using request.log or our global logger will now both 
-  // automatically include the context metadata.
-  request.log.info({
-    method: request.method,
-    url: request.url,
-    statusCode: reply.statusCode,
-    duration: reply.elapsedTime.toFixed(2) + 'ms',
-    // You can still add specific metadata here
-    userId: contextManager.getMetadata('userId')
-  }, 'request completed');
-
-  done();
-});
-
-// ============================================================================
-// Error Handler
-// ============================================================================
-
-app.setErrorHandler((error: any, request, reply) => {
-  request.log.error(error);
-
-  const statusCode = error.statusCode || 500;
-  const errorResponse = {
-    success: false,
-    error: IS_PROD ? 'Internal Server Error' : error.name,
-    message: error.message,
-    ...(IS_PROD ? {} : { stack: error.stack }),
-  };
-
-  reply.status(statusCode).send(errorResponse);
-});
-
-// ============================================================================
-// Health Check Routes
-// ============================================================================
+  logger.info('✓ Response logging configured');
+}
 
 /**
- * Main health check endpoint
+ * Set up global error handler.
  * 
- * Returns overall application health status including:
- * - Database connectivity
- * - Active request count
- * - Service status
+ * Catches all unhandled errors and returns proper error responses.
+ * In production, hides internal error details.
  */
-app.get('/health', async (_request, reply) => {
-  try {
-    const hasDatabase = !!process.env.DATABASE_URL;
-    let dbConnected = false;
+function setupErrorHandler(app: FastifyInstance): void {
+  app.setErrorHandler((error, request, reply) => {
+    request.log.error({
+      err: error,
+    }, 'Request error');
 
-    // Check database connectivity
-    if (hasDatabase) {
-      try {
-        const client = await prismaManager.getClient();
-        await client.$queryRaw`SELECT 1`;
-        dbConnected = true;
-      } catch (error) {
-        app.log.warn({ error }, '[Health Check] Database connection check failed');
-        dbConnected = false;
-      }
-    }
-
-    // Check gRPC server status
-    //const grpcStatus = grpcServer?.getStats() || { isRunning: false };
-    const status = (hasDatabase && dbConnected
-      // && grpcStatus.isRunning
-    )
-
-      ? 'healthy'
-      : 'initializing';
-    return {
-      status,
-      services: {
-        database: dbConnected ? 'connected' : hasDatabase ? 'error' : 'not configured',
-        // grpc: grpcStatus.isRunning ? 'running' : 'stopped',
-        // grpcConnections: grpcStatus.connections || 0
-        // redis: redis ? 'connected' : 'not configured',
-        // queue: queue ? 'connected' : 'not configured',
-      },
-      timestamp: new Date().toISOString(),
-      activeRequests: prismaManager.getActiveRequestCount(),
-      uptime: process.uptime(),
+    const statusCode = error.statusCode || 500;
+    const errorResponse = {
+      success: false,
+      error: isDevelopment() ? error.name : 'Internal Server Error',
+      message: error.message,
+      ...(isDevelopment() && { stack: error.stack }),
     };
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    app.log.error({ error }, '[Health Check] Health check failed');
 
-    return reply.status(503).send({
-      status: 'unhealthy',
-      services: {
-        database: 'error',
-        grpc: 'error'
-      },
-      error: errorMessage,
-      timestamp: new Date().toISOString(),
-    });
-  }
-});
-
-// ============================================================================
-// API Routes
-// ============================================================================
-
-
-
-
-/**
- * Get all clusters
- * 
- * GET /api/v1/clusters
- */
-app.get('/api/v1/clusters', async (request) => {
-  const clusters = await request.prisma.cluster.findMany({
-    select: {
-      id: true,
-      name: true,
-      namespace: true,
-      status: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+    reply.status(statusCode).send(errorResponse);
   });
 
-  return {
-    success: true,
-    data: clusters,
-  };
-});
-
-
-// ============================================================================
-// Graceful Shutdown Handler
-// ============================================================================
+  logger.info('✓ Error handler configured');
+}
 
 /**
- * Graceful shutdown handler.
+ * Set up graceful shutdown.
  * 
- * **This is where ALL process signal handling happens.**
- * The database manager does NOT handle signals - only the server does.
+ * Handles SIGTERM and SIGINT signals to shut down cleanly.
  * 
- * Cleanup order:
- * 1. Close Fastify server (stop accepting new requests)
- * 2. Shutdown socket manager
- * 3. Shutdown queue workers
- * 4. Disconnect Redis
- * 5. Disconnect database (waits for active requests)
+ * Shutdown sequence:
+ * 1. Stop accepting new requests (close servers)
+ * 2. Wait for active requests to complete
+ * 3. Close database connections
+ * 4. Close Redis connections
+ * 5. Flush logs
+ * 6. Exit process
  */
-const gracefulShutdown = closeWithGrace({ delay: 10000 }, async ({ signal, err }) => {
-  if (err) {
-    app.log.error({ err }, '[Shutdown] Error triggered shutdown');
-  }
+function setupGracefulShutdown(app: FastifyInstance): void {
+  const gracefulShutdown = closeWithGrace(
+    { delay: TIMEOUTS.SHUTDOWN_MS },
+    async ({ signal, err }) => {
+      if (err) {
+        logger.error({ err }, 'Error triggered shutdown');
+      }
 
-  app.log.info(`[Shutdown] 🛑 Received ${signal}, shutting down gracefully...`);
+      logger.info(`🛑 Received ${signal}, shutting down gracefully...`);
 
+      // 1. Close Fastify server (stop accepting requests)
+      logger.info('Closing Fastify server...');
+      await app.close();
+      logger.info('✓ Fastify server closed');
 
-  // 2. Shutdown queue workers (commented out until implemented)
-  // 1. Stop gRPC server (close active streams)
-  // if (grpcServer) {
-  //   app.log.info('[Shutdown] Stopping gRPC server...');
-  //   await grpcServer.stop();
-  //   app.log.info('[Shutdown] ✓ gRPC server stopped');
-  // }
-  // if (queue) {
-  //   app.log.info('[Shutdown] Shutting down queue workers...');
-  //   await queue.shutdown();
-  //   app.log.info('[Shutdown] ✓ Queue workers stopped');
-  // }
+      // 2. Close gRPC server
+      if (grpcServer) {
+        logger.info('Closing gRPC server...');
+        await grpcServer.stop();
+        logger.info('✓ gRPC server closed');
+      }
 
-  // 3. Disconnect Redis (commented out until implemented)
-  // if (redis) {
-  //   app.log.info('[Shutdown] Disconnecting Redis...');
-  //   await redis.disconnect();
-  //   app.log.info('[Shutdown] ✓ Redis disconnected');
-  // }
+      // 2. Disconnect Redis
+      logger.info('Disconnecting Redis...');
+      await redisClient.disconnect();
+      logger.info('✓ Redis disconnected');
 
-  // 4. Disconnect database (waits for active requests)
-  app.log.info('[Shutdown] Disconnecting database...');
-  await prismaManager.disconnect();
-  app.log.info('[Shutdown] ✓ Database disconnected');
+      // 3. Disconnect database (waits for active requests)
+      logger.info('Disconnecting database...');
+      await prismaManager.disconnect();
+      logger.info('✓ Database disconnected');
 
-  // 5. Close Fastify server
-  app.log.info('[Shutdown] Closing Fastify server...');
-  await app.close();
-  app.log.info('[Shutdown] ✓ Server closed');
+      // 4. Flush logs
+      logger.info('Flushing logs...');
+      await flushLogger();
+      logger.info('✓ Logs flushed');
 
-  app.log.info('[Shutdown] 🎉 Shutdown complete');
-});
+      logger.info('🎉 Shutdown complete');
+    }
+  );
 
-// ============================================================================
-// Server Startup
-// ============================================================================
+  logger.info('✓ Graceful shutdown configured');
+}
 
 /**
- * Start the server
+ * Start the server.
+ * 
+ * This is the main application entry point that orchestrates
+ * the entire startup sequence.
  */
 async function start(): Promise<void> {
   try {
-    //  Setup services
-    await setupServices();
+    logger.info('🚀 Starting Consonant Control Plane...');
 
-    //  Setup plugins
-    await setupPlugins(app);
 
-    // routes
-    await registerEndpoint(app)
+    // 1. Initialize OpenTelemetry (must be first)
+    await initializeOpenTelemetry();
 
-    // Wait for Fastify to be ready
+    // 2. Create Fastify server
+    const app = createFastifyServer();
+    logger.info('✓ Fastify server created');
+
+    // 3. Initialize services
+    await initializeServices(app);
+    initWorkQueue(redisClient.getClient());
+
+
+    grpcServer = await startGrpcServer(env.GRPC_PORT);
+
+    logger.info(`✓ gRPC server listening on ${env.GRPC_HOST}:${env.GRPC_PORT}`);
+
+    // 4. Register plugins
+    await registerPlugins(app);
+
+    // 5. Set up request hooks
+    setupContextInjection(app);
+    setupResponseLogging(app);
+    setupErrorHandler(app);
+
+    // 6. Register routes
+    await registerRoutes(app);
+
+    // 7. Set up graceful shutdown
+    setupGracefulShutdown(app);
+
+    // 8. Wait for server to be ready
     await app.ready();
+    logger.info('✓ Fastify server ready');
 
-
-
-    // ✅ START GRPC SERVER
-    app.log.info('[Server] 🔌 Starting gRPC server...');
-    // grpcServer = createGrpcServer({
-    //   port: GRPC_PORT,
-    //   host: GRPC_HOST,
-    //   tlsEnabled: GRPC_TLS_ENABLED,
-    //   tlsCert: GRPC_TLS_CERT,
-    //   tlsKey: GRPC_TLS_KEY,
-    //   maxConnectionAge: 3600000,      // 1 hour
-    //   maxConnectionIdle: 300000,       // 5 minutes
-    //   keepaliveTime: 30000,            // 30 seconds
-    //   keepaliveTimeout: 10000          // 10 seconds
-    // });
-
-    // await grpcServer.start();
-    app.log.info('[Server] ✓ gRPC server started');
-
-    // Start Fastify HTTP server
+    // 9. Start HTTP server
     await app.listen({
-      port: PORT,
-      host: HOST,
+      port: env.PORT,
+      host: env.HOST,
     });
 
-    app.log.info(`[Server] 🚀 Server started successfully`);
-    app.log.info(`[Server] 📡 Listening on http://${HOST}:${PORT}`);
-    app.log.info(`[Server] 🔌 gRPC: ${GRPC_HOST}:${GRPC_PORT}`);
-    app.log.info(`[Server] 🏥 Health check at http://${HOST}:${PORT}/health`);
-    app.log.info(`[Server] 📊 Database health at http://${HOST}:${PORT}/health/db`);
-  } catch (err) {
-    app.log.error({ err }, '[Server] ❌ Failed to start server');
+    logger.info(`✓ HTTP server listening on http://${env.HOST}:${env.PORT}`);
+    logger.info(`✓ Health check: http://${env.HOST}:${env.PORT}${API_PATHS.HEALTH}`);
+    logger.info(`✓ Inngest: http://${env.HOST}:${env.PORT}${API_PATHS.INNGEST}`);
+
+    logger.info('🎉 Server started successfully');
+  } catch (error) {
+    logger.fatal({ err: error }, 'Failed to start server');
     process.exit(1);
   }
 }
 
-
-
-
-// ============================================================================
-// Start Application
-// ============================================================================
-
+// Start the server
 start();
-
-

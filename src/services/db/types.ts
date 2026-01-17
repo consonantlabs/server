@@ -1,4 +1,10 @@
-// src/db/types.ts
+/**
+ * @fileoverview Database Type Definitions
+ * @module services/db/types
+ * 
+ * TypeScript types for database module.
+ */
+
 import type { FastifyBaseLogger } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
 
@@ -52,24 +58,6 @@ export interface ConnectionResult {
   
   /** Number of retry attempts made */
   retries: number;
-}
-
-/**
- * Result of a Prisma CLI command execution.
- * Captures stdout, stderr, and exit status.
- */
-export interface CommandResult {
-  /** Whether command executed successfully (exit code 0) */
-  success: boolean;
-  
-  /** Standard output lines from the command */
-  output: string[];
-  
-  /** Standard error lines from the command */
-  errors: string[];
-  
-  /** Command exit code (null if process error) */
-  exitCode: number | null;
 }
 
 /**

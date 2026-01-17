@@ -1,0 +1,286 @@
+// Protocol Buffer definition for Consonant Agent Execution Platform
+// This defines the gRPC service that enables bidirectional streaming
+// between the control plane and Kubernetes relayers.
+//
+// ARCHITECTURAL PATTERN:
+// The relayer (in customer's cluster) initiates a long-lived bidirectional
+// stream. The control plane pushes work items downstream when executions
+// are queued. The relayer pushes status updates and logs upstream as
+// agents run. This architecture requires zero inbound firewall rules on
+// the customer side.
+
+syntax = "proto3";
+
+package consonant.v1;
+
+// =============================================================================
+// MAIN SERVICE DEFINITION
+// =============================================================================
+
+service ConsonantControlPlane {
+  // Bidirectional streaming RPC for work distribution and status reporting.
+  // The relayer calls this once at startup and keeps the stream open.
+  // The control plane uses this stream to push work and receive updates.
+  rpc StreamWork(stream RelayerMessage) returns (stream ControlPlaneMessage);
+  
+  // Cluster registration - called once when relayer starts
+  rpc RegisterCluster(ClusterInfo) returns (ClusterRegistration);
+}
+
+// =============================================================================
+// RELAYER -> CONTROL PLANE MESSAGES
+// =============================================================================
+
+// Messages sent from relayer to control plane
+message RelayerMessage {
+  oneof message {
+    HeartbeatMessage heartbeat = 1;
+    ExecutionStatusUpdate execution_status = 2;
+    LogBatch log_batch = 3;
+    TraceBatch trace_batch = 4;
+    MetricBatch metric_batch = 5;
+  }
+}
+
+// Heartbeat sent periodically to prove relayer is alive
+message HeartbeatMessage {
+  string cluster_id = 1;
+  int64 timestamp = 2;  // Unix timestamp in milliseconds
+  
+  // Current cluster state
+  ClusterStatus status = 3;
+}
+
+message ClusterStatus {
+  int32 active_pods = 1;        // Number of agent pods currently running
+  int32 pending_pods = 2;       // Number of pods waiting to start
+  ResourceAvailability available_resources = 3;
+}
+
+message ResourceAvailability {
+  string cpu = 1;        // Available CPU cores (e.g., "16")
+  string memory = 2;     // Available memory (e.g., "64Gi")
+  int32 gpu_nodes = 3;   // Number of GPU nodes available
+}
+
+// Status update for an execution
+message ExecutionStatusUpdate {
+  string execution_id = 1;
+  string cluster_id = 2;
+  
+  // Status transition
+  ExecutionStatus status = 3;
+  
+  // Timing information
+  int64 timestamp = 4;   // When this status change occurred
+  
+  // Additional details based on status
+  ExecutionStartedDetails started_details = 5;
+  ExecutionCompletedDetails completed_details = 6;
+  ExecutionFailedDetails failed_details = 7;
+}
+
+enum ExecutionStatus {
+  STATUS_UNKNOWN = 0;
+  STATUS_RECEIVED = 1;    // Relayer received the work item
+  STATUS_CREATING = 2;    // Creating Kubernetes resources
+  STATUS_STARTING = 3;    // Pod is starting
+  STATUS_RUNNING = 4;     // Agent is executing
+  STATUS_COMPLETED = 5;   // Successfully completed
+  STATUS_FAILED = 6;      // Failed
+}
+
+message ExecutionStartedDetails {
+  string pod_name = 1;         // Kubernetes pod name
+  string node_name = 2;        // Which node it's running on
+  int64 started_at = 3;        // Unix timestamp
+}
+
+message ExecutionCompletedDetails {
+  string result_json = 1;      // Agent's output as JSON string
+  int64 duration_ms = 2;       // Total execution time
+  ResourceUsage resource_usage = 3;
+  int64 completed_at = 4;      // Unix timestamp
+}
+
+message ExecutionFailedDetails {
+  string error_code = 1;       // e.g., "TIMEOUT", "OOM_KILLED", "EXIT_1"
+  string error_message = 2;    // Human-readable error
+  int32 exit_code = 3;         // Container exit code
+  string signal = 4;           // Signal if killed (e.g., "SIGKILL")
+  int32 attempt = 5;           // Which attempt this was
+  int64 failed_at = 6;         // Unix timestamp
+}
+
+message ResourceUsage {
+  double cpu_seconds = 1;           // Total CPU time consumed
+  double memory_mb_seconds = 2;     // Memory usage integrated over time
+  double gpu_seconds = 3;           // GPU time if applicable
+  int64 disk_read_bytes = 4;        // Disk I/O
+  int64 disk_write_bytes = 5;
+  int64 network_rx_bytes = 6;       // Network traffic
+  int64 network_tx_bytes = 7;
+}
+
+// Batch of log entries
+message LogBatch {
+  string execution_id = 1;
+  repeated LogEntry logs = 2;
+}
+
+message LogEntry {
+  int64 timestamp = 1;     // Unix timestamp in milliseconds
+  string level = 2;        // debug, info, warn, error
+  string message = 3;      // Log message
+  string stream = 4;       // stdout or stderr
+  string metadata_json = 5; // Optional structured data as JSON
+}
+
+// Batch of OpenTelemetry trace spans
+message TraceBatch {
+  string execution_id = 1;
+  repeated TraceSpan spans = 2;
+}
+
+message TraceSpan {
+  string trace_id = 1;
+  string span_id = 2;
+  string parent_span_id = 3;
+  string name = 4;
+  int64 start_time = 5;    // Unix timestamp in nanoseconds
+  int64 end_time = 6;      // Unix timestamp in nanoseconds
+  string attributes_json = 7; // Span attributes as JSON
+  string status = 8;       // ok or error
+}
+
+// Batch of metrics
+message MetricBatch {
+  string execution_id = 1;
+  repeated MetricPoint metrics = 2;
+}
+
+message MetricPoint {
+  int64 timestamp = 1;     // Unix timestamp in milliseconds
+  string name = 2;         // Metric name (e.g., "cpu.usage")
+  double value = 3;        // Metric value
+  string unit = 4;         // Unit (e.g., "cores", "bytes")
+  string tags_json = 5;    // Optional tags as JSON
+}
+
+// =============================================================================
+// CONTROL PLANE -> RELAYER MESSAGES
+// =============================================================================
+
+// Messages sent from control plane to relayer
+message ControlPlaneMessage {
+  oneof message {
+    WorkItem work_item = 1;
+    ConfigurationUpdate config_update = 2;
+    ControlCommand control_command = 3;
+  }
+}
+
+// Work item - instructions to execute an agent
+message WorkItem {
+  string execution_id = 1;
+  string agent_id = 2;
+  string agent_name = 3;
+  string agent_image = 4;
+  
+  // Agent input as JSON string
+  string input_json = 5;
+  
+  // Resource requirements
+  ResourceRequirements resources = 6;
+  
+  // Retry policy
+  RetryPolicy retry_policy = 7;
+  
+  // Advanced features
+  bool use_agent_sandbox = 8;
+  int32 warm_pool_size = 9;
+  string network_policy = 10;  // restricted, standard, unrestricted
+  
+  // Environment variables as JSON object
+  string environment_variables_json = 11;
+}
+
+message ResourceRequirements {
+  string cpu = 1;        // e.g., "2" or "2000m"
+  string memory = 2;     // e.g., "4Gi" or "4096Mi"
+  string gpu = 3;        // e.g., "1" for one GPU
+  string timeout = 4;    // e.g., "300s" or "5m"
+}
+
+message RetryPolicy {
+  int32 max_attempts = 1;
+  string backoff = 2;      // exponential, linear, constant
+  string initial_delay = 3; // e.g., "1s"
+}
+
+// Configuration update - change cluster settings
+message ConfigurationUpdate {
+  string cluster_id = 1;
+  
+  // Updated configuration as JSON
+  string config_json = 2;
+}
+
+// Control command - direct cluster control
+message ControlCommand {
+  string cluster_id = 1;
+  
+  enum CommandType {
+    COMMAND_UNKNOWN = 0;
+    COMMAND_SHUTDOWN = 1;      // Gracefully shutdown relayer
+    COMMAND_CANCEL_EXECUTION = 2; // Cancel specific execution
+    COMMAND_REFRESH_CONFIG = 3;   // Reload configuration
+  }
+  
+  CommandType command = 2;
+  string target_execution_id = 3; // For CANCEL_EXECUTION
+}
+
+// =============================================================================
+// CLUSTER REGISTRATION
+// =============================================================================
+
+// Cluster information sent during registration
+message ClusterInfo {
+  string api_key = 1;           // Customer's API key for authentication
+  string cluster_id = 2;        // Unique cluster identifier
+  string cluster_name = 3;      // Human-readable name
+  string relayer_version = 4;   // Version of the relayer software
+  
+  // Cluster capabilities
+  ClusterCapabilities capabilities = 5;
+}
+
+message ClusterCapabilities {
+  KubernetesInfo kubernetes = 1;
+  ResourceInfo resources = 2;
+  string region = 3;
+  string availability_zone = 4;
+}
+
+message KubernetesInfo {
+  string version = 1;       // e.g., "1.28.5"
+  string provider = 2;      // aws, gcp, azure, etc.
+}
+
+message ResourceInfo {
+  string total_cpu = 1;     // Total CPU cores in cluster
+  string total_memory = 2;  // Total memory in cluster
+  int32 gpu_nodes = 3;      // Number of nodes with GPUs
+  string gpu_type = 4;      // e.g., "nvidia-tesla-v100"
+}
+
+// Response from cluster registration
+message ClusterRegistration {
+  bool success = 1;
+  string cluster_id = 2;
+  string message = 3;       // Success or error message
+  
+  // Initial configuration for the relayer
+  string config_json = 4;
+}

@@ -1,0 +1,162 @@
+
+> @consonantlabs/control-plane@1.0.0 typecheck
+> tsc --noEmit
+
+src/controllers/api-keys.controller.ts(100,7): error TS2322: Type '{ organizationId: string; name: string; keyHash: string; expiresAt: Date | null; rateLimit: number; }' is not assignable to type '(Without<ApiKeyCreateInput, ApiKeyUncheckedCreateInput> & ApiKeyUncheckedCreateInput) | (Without<...> & ApiKeyCreateInput)'.
+  Type '{ organizationId: string; name: string; keyHash: string; expiresAt: Date | null; rateLimit: number; }' is not assignable to type 'Without<ApiKeyCreateInput, ApiKeyUncheckedCreateInput> & ApiKeyUncheckedCreateInput'.
+    Property 'keyPrefix' is missing in type '{ organizationId: string; name: string; keyHash: string; expiresAt: Date | null; rateLimit: number; }' but required in type 'ApiKeyUncheckedCreateInput'.
+src/controllers/api-keys.controller.ts(119,7): error TS2322: Type '"apikey.created"' is not assignable to type 'keyof ConsonantEvents'.
+src/controllers/api-keys.controller.ts(121,9): error TS2353: Object literal may only specify known properties, and 'organizationId' does not exist in type '{ agentId: string; apiKeyId: string; config: AgentConfig; createdAt: string; } | { agentId: string; apiKeyHash: string; changes: Partial<AgentConfig>; updatedAt: string; } | ... 12 more ... | { ...; }'.
+src/controllers/api-keys.controller.ts(301,7): error TS2322: Type '"apikey.rotated"' is not assignable to type 'keyof ConsonantEvents'.
+src/controllers/api-keys.controller.ts(303,9): error TS2353: Object literal may only specify known properties, and 'organizationId' does not exist in type '{ agentId: string; apiKeyId: string; config: AgentConfig; createdAt: string; } | { agentId: string; apiKeyHash: string; changes: Partial<AgentConfig>; updatedAt: string; } | ... 12 more ... | { ...; }'.
+src/controllers/api-keys.controller.ts(398,7): error TS2322: Type '"apikey.revoked"' is not assignable to type 'keyof ConsonantEvents'.
+src/controllers/api-keys.controller.ts(400,9): error TS2353: Object literal may only specify known properties, and 'organizationId' does not exist in type '{ agentId: string; apiKeyId: string; config: AgentConfig; createdAt: string; } | { agentId: string; apiKeyHash: string; changes: Partial<AgentConfig>; updatedAt: string; } | ... 12 more ... | { ...; }'.
+src/controllers/auth.controller.ts(22,36): error TS6133: 'generateSecureToken' is declared but its value is never read.
+src/controllers/auth.controller.ts(154,9): error TS2353: Object literal may only specify known properties, and 'password' does not exist in type '(Without<UserCreateInput, UserUncheckedCreateInput> & UserUncheckedCreateInput) | (Without<...> & UserCreateInput)'.
+src/controllers/auth.controller.ts(222,55): error TS2339: Property 'password' does not exist on type '{ name: string | null; id: string; email: string; createdAt: Date; updatedAt: Date; }'.
+src/controllers/auth.controller.ts(425,62): error TS2339: Property 'password' does not exist on type '{ name: string | null; id: string; email: string; createdAt: Date; updatedAt: Date; }'.
+src/controllers/auth.controller.ts(441,15): error TS2353: Object literal may only specify known properties, and 'password' does not exist in type '(Without<UserUpdateInput, UserUncheckedUpdateInput> & UserUncheckedUpdateInput) | (Without<...> & UserUpdateInput)'.
+src/controllers/clusters.controller.ts(114,7): error TS2322: Type '{ organizationId: string; name: string; namespace: string; secretHash: string; status: "PENDING"; }' is not assignable to type '(Without<ClusterCreateInput, ClusterUncheckedCreateInput> & ClusterUncheckedCreateInput) | (Without<...> & ClusterCreateInput)'.
+  Type '{ organizationId: string; name: string; namespace: string; secretHash: string; status: "PENDING"; }' is not assignable to type 'Without<ClusterCreateInput, ClusterUncheckedCreateInput> & ClusterUncheckedCreateInput'.
+    Property 'capabilities' is missing in type '{ organizationId: string; name: string; namespace: string; secretHash: string; status: "PENDING"; }' but required in type 'ClusterUncheckedCreateInput'.
+src/controllers/clusters.controller.ts(211,29): error TS2339: Property 'lastSeenAt' does not exist on type '{ name: string; id: string; createdAt: Date; updatedAt: Date; namespace: string; status: ClusterStatus; lastHeartbeat: Date | null; relayerVersion: string | null; }'.
+src/controllers/clusters.controller.ts(289,29): error TS2339: Property 'lastSeenAt' does not exist on type '{ name: string; id: string; createdAt: Date; updatedAt: Date; namespace: string; status: ClusterStatus; lastHeartbeat: Date | null; relayerVersion: string | null; relayerConfig: JsonValue; }'.
+src/plugins/prisma.plugin.ts(43,35): error TS6133: 'request' is declared but its value is never read.
+src/plugins/prisma.plugin.ts(43,60): error TS6133: 'reply' is declared but its value is never read.
+src/plugins/prisma.plugin.ts(47,36): error TS6133: 'request' is declared but its value is never read.
+src/plugins/prisma.plugin.ts(47,61): error TS6133: 'reply' is declared but its value is never read.
+src/plugins/request-timeline.plugin.ts(32,1): error TS6133: 'generateUUID' is declared but its value is never read.
+src/plugins/request-timeline.plugin.ts(155,35): error TS2345: Argument of type 'null' is not assignable to parameter of type 'GetterSetter<FastifyRequest<RouteGenericInterface, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>, { ...; }>'.
+src/plugins/request-timeline.plugin.ts(156,43): error TS2345: Argument of type 'null' is not assignable to parameter of type 'GetterSetter<FastifyRequest<RouteGenericInterface, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>, (this: FastifyRequest<...>, name: string, startTime: number, endTime: number, metadata?: Record<...> | undefined) => void>'.
+src/plugins/request-timeline.plugin.ts(157,38): error TS2345: Argument of type 'null' is not assignable to parameter of type 'GetterSetter<FastifyRequest<RouteGenericInterface, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>, (this: FastifyRequest<...>, name: string, metadata?: Record<...> | undefined) => () => void>'.
+src/plugins/request-timeline.plugin.ts(162,60): error TS6133: 'reply' is declared but its value is never read.
+src/plugins/request-timeline.plugin.ts(248,9): error TS2322: Type '"request.timeline.completed"' is not assignable to type 'keyof ConsonantEvents'.
+src/plugins/request-timeline.plugin.ts(250,11): error TS2353: Object literal may only specify known properties, and 'timeline' does not exist in type '{ agentId: string; apiKeyId: string; config: AgentConfig; createdAt: string; } | { agentId: string; apiKeyHash: string; changes: Partial<AgentConfig>; updatedAt: string; } | ... 12 more ... | { ...; }'.
+src/routes/auth.route.ts(40,58): error TS2345: Argument of type '(request: FastifyRequest<{ Body: { name?: string | undefined; }; }, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>, reply: FastifyReply<...>) => Promise<...>' is not assignable to parameter of type 'RouteHandlerMethod<RawServerDefault, IncomingMessage, ServerResponse<IncomingMessage>, RouteGenericInterface, unknown, FastifySchema, FastifyTypeProviderDefault, FastifyBaseLogger>'.
+  Types of parameters 'request' and 'request' are incompatible.
+    Type 'FastifyRequest<RouteGenericInterface, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>' is not assignable to type 'FastifyRequest<{ Body: { name?: string | undefined; }; }, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>'.
+      Type 'RouteGenericInterface' is not assignable to type '{ Body: { name?: string | undefined; }; }'.
+        Types of property 'Body' are incompatible.
+          Type 'unknown' is not assignable to type '{ name?: string | undefined; }'.
+src/routes/auth.route.ts(41,70): error TS2345: Argument of type '(request: FastifyRequest<{ Body: ChangePasswordBody; }, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>, reply: FastifyReply<...>) => Promise<...>' is not assignable to parameter of type 'RouteHandlerMethod<RawServerDefault, IncomingMessage, ServerResponse<IncomingMessage>, RouteGenericInterface, unknown, FastifySchema, FastifyTypeProviderDefault, FastifyBaseLogger>'.
+  Types of parameters 'request' and 'request' are incompatible.
+    Type 'FastifyRequest<RouteGenericInterface, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>' is not assignable to type 'FastifyRequest<{ Body: ChangePasswordBody; }, RawServerDefault, IncomingMessage, FastifySchema, FastifyTypeProviderDefault, unknown, FastifyBaseLogger, ResolveFastifyRequestType<...>>'.
+      Type 'RouteGenericInterface' is not assignable to type '{ Body: ChangePasswordBody; }'.
+        Types of property 'Body' are incompatible.
+          Type 'unknown' is not assignable to type 'ChangePasswordBody'.
+src/routes/clusters.route.ts(2,10): error TS2305: Module '"../controllers/clusters.controller.js"' has no exported member 'createClusterController'.
+src/routes/index.ts(27,36): error TS2307: Cannot find module './organizations.route.js' or its corresponding type declarations.
+src/routes/index.ts(28,33): error TS2307: Cannot find module './dashboard.route.js' or its corresponding type declarations.
+src/routes/index.ts(29,30): error TS2307: Cannot find module './api-keys.route.js' or its corresponding type declarations.
+src/routes/sdk.ts(27,34): error TS2307: Cannot find module '../inngest/events.js' or its corresponding type declarations.
+src/routes/sdk.ts(56,29): error TS2554: Expected 2-3 arguments, but got 1.
+src/routes/sdk.ts(64,14): error TS2554: Expected 2-3 arguments, but got 1.
+src/routes/sdk.ts(117,21): error TS2353: Object literal may only specify known properties, and 'apiKeyHash' does not exist in type '{ agentId: string; apiKeyId: string; config: AgentConfig; createdAt: string; }'.
+src/routes/sdk.ts(210,21): error TS2353: Object literal may only specify known properties, and 'apiKeyHash' does not exist in type '{ executionId: string; agentId: string; apiKeyId: string; input: AgentInput; priority: "high" | "normal" | "low"; cluster?: string | undefined; requestedAt: string; }'.
+src/server.ts(246,38): error TS6133: 'reply' is declared but its value is never read.
+src/server.ts(300,24): error TS18046: 'error' is of type 'unknown'.
+src/server.ts(303,32): error TS18046: 'error' is of type 'unknown'.
+src/server.ts(304,16): error TS18046: 'error' is of type 'unknown'.
+src/server.ts(305,39): error TS18046: 'error' is of type 'unknown'.
+src/server.ts(328,9): error TS6133: 'gracefulShutdown' is declared but its value is never read.
+src/services/agent-registry.ts(17,34): error TS2307: Cannot find module '../inngest/events.js' or its corresponding type declarations.
+src/services/api-key.service.ts(10,49): error TS2307: Cannot find module '../../utils/crypto.js' or its corresponding type declarations.
+src/services/api-key.service.ts(11,24): error TS2307: Cannot find module '../../utils/logger.js' or its corresponding type declarations.
+src/services/cluster-selection.ts(18,34): error TS2307: Cannot find module '../inngest/events.js' or its corresponding type declarations.
+src/services/cluster-selection.ts(150,28): error TS2352: Conversion of type 'string | number | boolean | JsonObject | JsonArray | null' to type 'ClusterCapabilities' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Type 'JsonValue[]' is missing the following properties from type 'ClusterCapabilities': kubernetes, resources
+src/services/cluster-selection.ts(234,30): error TS2352: Conversion of type 'string | number | boolean | JsonObject | JsonArray | null' to type 'ClusterCapabilities' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Type 'JsonValue[]' is missing the following properties from type 'ClusterCapabilities': kubernetes, resources
+src/services/cluster-selection.ts(279,16): error TS2353: Object literal may only specify known properties, and 'apiKeyId' does not exist in type 'ClusterWhereInput'.
+src/services/cluster-selection.ts(294,23): error TS2352: Conversion of type 'string | number | boolean | JsonObject | JsonArray | null' to type 'ClusterCapabilities' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Type 'JsonValue[]' is missing the following properties from type 'ClusterCapabilities': kubernetes, resources
+src/services/db/connection.ts(129,3): error TS6133: 'provider' is declared but its value is never read.
+src/services/db/dbPlugin.ts(62,40): error TS6133: 'request' is declared but its value is never read.
+src/services/grpc/client.ts(33,32): error TS2307: Cannot find module '../../types/agentManifest.js' or its corresponding type declarations.
+src/services/grpc/handlers/event-handler.ts(1,28): error TS2307: Cannot find module '@consonant/proto-relayer' or its corresponding type declarations.
+src/services/grpc/handlers/event-handler.ts(104,5): error TS6133: 'event' is declared but its value is never read.
+src/services/grpc/interceptors/auth-interceptor.ts(3,10): error TS2305: Module '"../../db/index.js"' has no exported member 'prisma'.
+src/services/grpc/interceptors/auth-interceptor.ts(18,14): error TS2328: Types of parameters 'nextCall' and 'nextCall' are incompatible.
+  Type 'InterceptingCallInterface' is missing the following properties from type 'InterceptingCall': nextCall, requester, processingMetadata, pendingMessageContext, and 5 more.
+src/services/grpc/interceptors/auth-interceptor.ts(34,15): error TS2322: Type '{ name: string; message: string; code: grpc.status.UNAUTHENTICATED; details: string; }' is not assignable to type 'ServiceError'.
+  Property 'metadata' is missing in type '{ name: string; message: string; code: grpc.status.UNAUTHENTICATED; details: string; }' but required in type 'StatusObject'.
+src/services/grpc/interceptors/auth-interceptor.ts(50,13): error TS7006: Parameter 'cluster' implicitly has an 'any' type.
+src/services/grpc/interceptors/auth-interceptor.ts(54,17): error TS2322: Type '{ name: string; message: string; code: grpc.status.UNAUTHENTICATED; details: string; }' is not assignable to type 'ServiceError'.
+  Property 'metadata' is missing in type '{ name: string; message: string; code: grpc.status.UNAUTHENTICATED; details: string; }' but required in type 'StatusObject'.
+src/services/grpc/interceptors/auth-interceptor.ts(72,58): error TS2769: No overload matches this call.
+  Overload 1 of 3, '(obj: "[AuthInterceptor] Invalid token", msg?: undefined): void', gave the following error.
+    Argument of type '{ clusterId: string; }' is not assignable to parameter of type 'undefined'.
+  Overload 2 of 3, '(obj: "[AuthInterceptor] Invalid token", msg?: undefined, ...args: unknown[]): void', gave the following error.
+    Argument of type '{ clusterId: string; }' is not assignable to parameter of type 'undefined'.
+src/services/grpc/interceptors/auth-interceptor.ts(74,17): error TS2322: Type '{ name: string; message: string; code: grpc.status.UNAUTHENTICATED; details: string; }' is not assignable to type 'ServiceError'.
+  Property 'metadata' is missing in type '{ name: string; message: string; code: grpc.status.UNAUTHENTICATED; details: string; }' but required in type 'StatusObject'.
+src/services/grpc/interceptors/auth-interceptor.ts(93,14): error TS7006: Parameter 'error' implicitly has an 'any' type.
+src/services/grpc/interceptors/auth-interceptor.ts(99,15): error TS2322: Type '{ name: string; message: string; code: grpc.status.INTERNAL; details: string; }' is not assignable to type 'ServiceError'.
+  Property 'metadata' is missing in type '{ name: string; message: string; code: grpc.status.INTERNAL; details: string; }' but required in type 'StatusObject'.
+src/services/grpc/interceptors/error-interceptor.ts(4,14): error TS2328: Types of parameters 'nextCall' and 'nextCall' are incompatible.
+  Type 'InterceptingCallInterface' is missing the following properties from type 'InterceptingCall': nextCall, requester, processingMetadata, pendingMessageContext, and 5 more.
+src/services/grpc/interceptors/logging-interceptor.ts(4,14): error TS2328: Types of parameters 'nextCall' and 'nextCall' are incompatible.
+  Type 'InterceptingCallInterface' is missing the following properties from type 'InterceptingCall': nextCall, requester, processingMetadata, pendingMessageContext, and 5 more.
+src/services/grpc/server.ts(160,9): error TS2353: Object literal may only specify known properties, and 'apiKeyHash' does not exist in type '{ clusterId: string; apiKeyId: string; capabilities: ClusterCapabilities; relayerVersion: string; connectedAt: string; }'.
+src/services/grpc/server.ts(221,29): error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+  Type 'null' is not assignable to type 'string'.
+src/services/grpc/server.ts(226,39): error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+  Type 'null' is not assignable to type 'string'.
+src/services/grpc/server.ts(325,32): error TS6133: 'stream' is declared but its value is never read.
+src/services/grpc/server.ts(607,18): error TS1308: 'await' expressions are only allowed within async functions and at the top levels of modules.
+src/services/inngest/client.ts(95,24): error TS2345: Argument of type '{ name: T; data: ConsonantEvents[T]["data"]; }' is not assignable to parameter of type 'SendEventPayload<WithoutInternal<{ "inngest/function.failed": { data: { function_id: string; run_id: string; error: JsonError; event: EventPayload<any>; }; name: "inngest/function.failed"; }; ... 18 more ...; "agent.metrics.batch": { ...; }; }>>'.
+  Type '{ name: T; data: ConsonantEvents[T]["data"]; }' is not assignable to type '{ ts?: number | undefined; name: "agent.metrics.batch"; user?: any; id?: string | undefined; data: { executionId: string; metrics: { timestamp: string; name: string; value: number; unit: string; tags?: Record<...> | undefined; }[]; }; }'.
+    Types of property 'name' are incompatible.
+      Type 'T' is not assignable to type '"agent.metrics.batch"'.
+        Type 'keyof ConsonantEvents' is not assignable to type '"agent.metrics.batch"'.
+          Type '"cluster.connected"' is not assignable to type '"agent.metrics.batch"'.
+src/services/inngest/client.ts(148,24): error TS2345: Argument of type '{ name: T; data: ConsonantEvents[T]["data"]; }[]' is not assignable to parameter of type 'SendEventPayload<WithoutInternal<{ "inngest/function.failed": { data: { function_id: string; run_id: string; error: JsonError; event: EventPayload<any>; }; name: "inngest/function.failed"; }; ... 18 more ...; "agent.metrics.batch": { ...; }; }>>'.
+  Type '{ name: T; data: ConsonantEvents[T]["data"]; }[]' is not assignable to type '({ ts?: number | undefined; name: "cluster.connected"; user?: any; id?: string | undefined; data: { clusterId: string; apiKeyId: string; capabilities: ClusterCapabilities; relayerVersion: string; connectedAt: string; }; } | ... 13 more ... | { ...; })[]'.
+    Type '{ name: T; data: ConsonantEvents[T]["data"]; }' is not assignable to type '{ ts?: number | undefined; name: "cluster.connected"; user?: any; id?: string | undefined; data: { clusterId: string; apiKeyId: string; capabilities: ClusterCapabilities; relayerVersion: string; connectedAt: string; }; } | ... 13 more ... | { ...; }'.
+      Type '{ name: T; data: ConsonantEvents[T]["data"]; }' is not assignable to type '{ ts?: number | undefined; name: "agent.metrics.batch"; user?: any; id?: string | undefined; data: { executionId: string; metrics: { timestamp: string; name: string; value: number; unit: string; tags?: Record<...> | undefined; }[]; }; }'.
+        Types of property 'name' are incompatible.
+          Type 'T' is not assignable to type '"agent.metrics.batch"'.
+            Type 'keyof ConsonantEvents' is not assignable to type '"agent.metrics.batch"'.
+              Type '"cluster.connected"' is not assignable to type '"agent.metrics.batch"'.
+src/services/inngest/functions/cluster-lifecycle.ts(35,7): error TS2339: Property 'organizationId' does not exist on type '{ clusterId: string; apiKeyId: string; capabilities: ClusterCapabilities; relayerVersion: string; connectedAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(37,7): error TS2339: Property 'clusterName' does not exist on type '{ clusterId: string; apiKeyId: string; capabilities: ClusterCapabilities; relayerVersion: string; connectedAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(38,7): error TS2339: Property 'namespace' does not exist on type '{ clusterId: string; apiKeyId: string; capabilities: ClusterCapabilities; relayerVersion: string; connectedAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(38,7): error TS6133: 'namespace' is declared but its value is never read.
+src/services/inngest/functions/cluster-lifecycle.ts(40,7): error TS2339: Property 'timestamp' does not exist on type '{ clusterId: string; apiKeyId: string; capabilities: ClusterCapabilities; relayerVersion: string; connectedAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(61,26): error TS2304: Cannot find name 'capabilities'.
+src/services/inngest/functions/cluster-lifecycle.ts(97,24): error TS2339: Property 'apiKeyHash' does not exist on type '{ clusterId: string; reason: "error" | "graceful" | "timeout"; error?: string | undefined; disconnectedAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(97,36): error TS2339: Property 'capabilities' does not exist on type '{ clusterId: string; reason: "error" | "graceful" | "timeout"; error?: string | undefined; disconnectedAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(97,36): error TS6133: 'capabilities' is declared but its value is never read.
+src/services/inngest/functions/cluster-lifecycle.ts(97,50): error TS2339: Property 'relayerVersion' does not exist on type '{ clusterId: string; reason: "error" | "graceful" | "timeout"; error?: string | undefined; disconnectedAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(97,50): error TS6133: 'relayerVersion' is declared but its value is never read.
+src/services/inngest/functions/cluster-lifecycle.ts(97,66): error TS2339: Property 'connectedAt' does not exist on type '{ clusterId: string; reason: "error" | "graceful" | "timeout"; error?: string | undefined; disconnectedAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(130,11): error TS2353: Object literal may only specify known properties, and 'socketId' does not exist in type '(Without<ClusterUpdateInput, ClusterUncheckedUpdateInput> & ClusterUncheckedUpdateInput) | (Without<...> & ClusterUpdateInput)'.
+src/services/inngest/functions/cluster-lifecycle.ts(175,13): error TS2339: Property 'organizationId' does not exist on type '{ clusterId: string; status: { activePods: number; availableResources: { cpu: string; memory: string; }; }; heartbeatAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(175,13): error TS6133: 'organizationId' is declared but its value is never read.
+src/services/inngest/functions/cluster-lifecycle.ts(175,40): error TS2339: Property 'timestamp' does not exist on type '{ clusterId: string; status: { activePods: number; availableResources: { cpu: string; memory: string; }; }; heartbeatAt: string; }'.
+src/services/inngest/functions/cluster-lifecycle.ts(215,5): error TS2322: Type '"cluster.error"' is not assignable to type 'undefined'.
+src/services/inngest/functions/cluster-lifecycle.ts(216,19): error TS6133: 'step' is declared but its value is never read.
+src/services/inngest/functions/cluster-lifecycle.ts(285,11): error TS2353: Object literal may only specify known properties, and 'lastSeenAt' does not exist in type 'ClusterWhereInput'.
+src/services/inngest/functions/execution-workflow.ts(60,39): error TS2339: Property 'apiKeyHash' does not exist on type '{ executionId: string; agentId: string; apiKeyId: string; input: AgentInput; priority: "high" | "normal" | "low"; cluster?: string | undefined; requestedAt: string; }'.
+src/services/inngest/functions/execution-workflow.ts(454,29): error TS2353: Object literal may only specify known properties, and 'apiKeyHash' does not exist in type '{ executionId: string; agentId: string; apiKeyId: string; input: AgentInput; priority: "high" | "normal" | "low"; cluster?: string | undefined; requestedAt: string; }'.
+src/services/inngest/functions/request-timeline.ts(50,5): error TS2322: Type '"request.timeline.completed"' is not assignable to type 'undefined'.
+src/services/inngest/functions/request-timeline.ts(82,15): error TS6133: 'client' is declared but its value is never read.
+src/services/inngest/functions/request-timeline.ts(102,52): error TS7006: Parameter 'acc' implicitly has an 'any' type.
+src/services/inngest/functions/request-timeline.ts(102,57): error TS7006: Parameter 'event' implicitly has an 'any' type.
+src/services/inngest/functions/telemetry-batch.ts(33,5): error TS2322: Type '"telemetry.trace.batch"' is not assignable to type 'undefined'.
+src/services/inngest/functions/telemetry-batch.ts(122,5): error TS2322: Type '"telemetry.metric.batch"' is not assignable to type 'undefined'.
+src/services/inngest/functions/telemetry-batch.ts(194,5): error TS2322: Type '"telemetry.log.batch"' is not assignable to type 'undefined'.
+src/services/opentelemetry/collector.ts(40,61): error TS2339: Property 'agentRunId' does not exist on type 'ExecutionContext'.
+src/services/opentelemetry/router.ts(1,42): error TS2307: Cannot find module 'socket.io' or its corresponding type declarations.
+src/services/opentelemetry/router.ts(23,13): error TS6138: Property 'observabilityConfig' is declared but its value is never read.
+src/services/opentelemetry/router.ts(205,7): error TS6133: 'timeout' is declared but its value is never read.
+src/services/opentelemetry/tracer.ts(26,28): error TS2307: Cannot find module '@opentelemetry/resources' or its corresponding type declarations.
+src/services/opentelemetry/tracer.ts(28,36): error TS7016: Could not find a declaration file for module '@opentelemetry/sdk-trace-base'. '/home/paul/consonant/server/node_modules/@opentelemetry/sdk-trace-base/build/src/index.js' implicitly has an 'any' type.
+  Try `npm i --save-dev @types/opentelemetry__sdk-trace-base` if it exists or add a new declaration (.d.ts) file containing `declare module '@opentelemetry/sdk-trace-base';`
+src/services/opentelemetry/tracer.ts(81,13): error TS2353: Object literal may only specify known properties, and 'enabled' does not exist in type 'FsInstrumentationConfig'.
+src/services/opentelemetry/tracer.ts(86,13): error TS2353: Object literal may only specify known properties, and 'enabled' does not exist in type 'HttpInstrumentationConfig'.
+src/services/opentelemetry/tracer.ts(95,13): error TS2353: Object literal may only specify known properties, and 'enabled' does not exist in type 'FastifyInstrumentationConfig'.
+src/services/opentelemetry/tracer.ts(100,13): error TS2353: Object literal may only specify known properties, and 'enabled' does not exist in type 'GrpcInstrumentationConfig'.
+src/services/redis/client.ts(22,1): error TS6133: 'REDIS_KEYS' is declared but its value is never read.
+src/utils/logger.ts(28,30): error TS6133: 'isProduction' is declared but its value is never read.
+src/utils/redactor.ts(154,17): error TS6133: 'name' is declared but its value is never read.

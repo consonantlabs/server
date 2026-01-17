@@ -84,8 +84,8 @@ export class SensitiveDataRedactor {
       return {
         name: obj.name,
         message: this.redactString(obj.message),
-        stack: process.env.NODE_ENV === 'production' 
-          ? '[REDACTED_IN_PRODUCTION]' 
+        stack: process.env.NODE_ENV === 'production'
+          ? '[REDACTED_IN_PRODUCTION]'
           : this.redactString(obj.stack || ''),
       };
     }
@@ -151,7 +151,7 @@ export class SensitiveDataRedactor {
       redacted = redacted.replace(IP_PATTERN, '***.***.***.***');
     }
 
-    for (const [name, pattern] of this.customPatterns) {
+    for (const pattern of this.customPatterns.values()) {
       redacted = redacted.replace(pattern, this.redactionText);
     }
 

@@ -19,7 +19,7 @@
     /* Interop and Consistency */
     "esModuleInterop": true,              // Enables compatibility for default imports from CommonJS modules
     "forceConsistentCasingInFileNames": true, // Ensure consistent file naming
-    
+    "allowSyntheticDefaultImports": true,
     /* Strict Type Checking (Best of the First Config) */
     "strict": true,                       // Enables all 'strict' family options below
     "noImplicitAny": true,                // Disallow implicit 'any' types
@@ -31,13 +31,23 @@
     "alwaysStrict": true,                 // Emit 'use strict' at the beginning of each file
 
     /* Code Flow and Style Checks */
-    "noFallthroughCasesInSwitch": true,   // Prevent unintentional fallthrough in switch statements
-    "skipLibCheck": true,                 // Speed up compilation by skipping type checking of declaration files
+  "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+     "skipLibCheck": true,               // Speed up compilation by skipping type checking of declaration files
      "checkJs": false,
     /* Optional: Cleaner Imports */
     "baseUrl": "./",                      // Root for non-relative module resolution
     "paths": {
       "@/*": ["src/*"],
+      "@config/*": ["src/config/*"],
+      "@services/*": ["src/services/*"],
+      "@utils/*": ["src/utils/*"],
+      "@routes/*": ["src/routes/*"],
+      "@controllers/*": ["src/controllers/*"],
+      "@middleware/*": ["src/middleware/*"],
+      "@types/*": ["src/types/*"],
        "@generated/*": ["src/generated/*"]
     }
   },
@@ -46,6 +56,8 @@
   ],
   "exclude": [
     "node_modules",
-    "dist", 
+    "dist",
+    "**/*.test.ts",
+    "**/*.spec.ts"
   ]
 }

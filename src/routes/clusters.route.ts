@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { createClusterController } from '../controllers/clusters.controller.js';
+import { registerCluster } from '../controllers/clusters.controller.js';
 
 export async function clusterRoutes(app: FastifyInstance) {
   app.post(
@@ -16,7 +16,7 @@ export async function clusterRoutes(app: FastifyInstance) {
         },
       },
     },
-    createClusterController
+    registerCluster
   );
 }
 

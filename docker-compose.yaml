@@ -1,0 +1,92 @@
+# Consonant Labs Control Plane - Docker Compose Development Environment
+#
+# This composition provides all services needed for local development:
+# - PostgreSQL with TimescaleDB extension
+# - Redis for rate limiting and caching
+# - Jaeger for distributed tracing (OpenTelemetry)
+# - Inngest Dev Server for workflow development
+#
+# Usage:
+#   docker-compose up -d     # Start all services
+#   docker-compose logs -f   # View logs
+#   docker-compose down      # Stop all services
+#   docker-compose down -v   # Stop and remove volumes (fresh start)
+
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # PostgreSQL with TimescaleDB
+  # ==========================================================================
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: consonant-postgres
+    environment:
+      POSTGRES_DB: consonant
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Redis
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: consonant-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Jaeger (OpenTelemetry Collector + UI)
+  # ==========================================================================
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: consonant-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "16686:16686" # Jaeger UI
+      - "14268:14268" # Jaeger Collector
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Inngest Dev Server
+  # ==========================================================================
+  inngest:
+    image: inngest/inngest:latest
+    container_name: consonant-inngest
+    ports:
+      - "8288:8288"   # Inngest Dev Server UI
+    environment:
+      - INNGEST_DEV=true
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  default:
+    name: consonant-network

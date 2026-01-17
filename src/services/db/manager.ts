@@ -1,48 +1,40 @@
-// src/db/manager.ts
-import { PrismaClient } from '@prisma/client';
-import { Mutex } from 'async-mutex';
-import { createAdapter } from './adapter.js';
-import { connectWithRetry, disconnect } from './connection.js';
-import type { AppLogger } from './types.js';
-import { execSync } from 'child_process';
-
 /**
+ * @fileoverview Prisma Client Manager
+ * @module services/db/manager
+ * 
  * Thread-safe Prisma client manager for production environments.
  * 
- * **Design Principles:**
+ * DESIGN PRINCIPLES:
  * - DATABASE_URL read once at startup
  * - Any env change requires full application restart with SIGTERM
  * - Immutable after initialization
  * - Logger injected once, stored in memory
  * 
- * **Features:**
- * - ✓ Singleton pattern for single client instance
- * - ✓ Thread-safe operations using mutex
- * - ✓ Connection retry logic
- * - ✓ Active request tracking for graceful shutdown
- * - ✓ Proper logger injection (no globals)
+ * FEATURES:
+ * - Singleton pattern for single client instance
+ * - Thread-safe operations using mutex
+ * - Connection retry logic
+ * - Active request tracking for graceful shutdown
+ * - Proper logger injection (no globals)
  * 
- * **Lifecycle:**
- * 1. Server calls `initialize(logger)` at startup
+ * LIFECYCLE:
+ * 1. Server calls initialize(logger) at startup
  * 2. Manager creates client, connects, stores in memory
- * 3. Requests use `getClient()` to access the same instance
- * 4. Server calls `disconnect()` during shutdown
- * 
- * @example
- * ```typescript
- * // In server startup:
- * await prismaManager.initialize(app.log);
- * 
- * // In routes/services:
- * const client = await prismaManager.getClient();
- * const users = await client.user.findMany();
- * 
- * // In server shutdown:
- * await prismaManager.disconnect();
- * ```
+ * 3. Requests use getClient() to access the same instance
+ * 4. Server calls disconnect() during shutdown
+ */
+
+import { PrismaClient } from '@prisma/client';
+import { Mutex } from 'async-mutex';
+import { execSync } from 'child_process';
+import { createAdapter } from './adapter.js';
+import { connectWithRetry, disconnect } from './connection.js';
+import type { AppLogger } from './types.js';
+
+/**
+ * Prisma client manager singleton.
  */
 class PrismaManager {
-  
   /** Singleton Prisma client instance (null until initialized) */
   private client: PrismaClient | null = null;
 
@@ -61,50 +53,43 @@ class PrismaManager {
   /** Logger instance (injected once at initialization) */
   private logger: AppLogger | null = null;
 
-
   /**
    * Initialize the Prisma client with the current DATABASE_URL.
    * 
-   * **IMPORTANT:** This can only be called ONCE. Any DATABASE_URL change
+   * IMPORTANT: This can only be called ONCE. Any DATABASE_URL change
    * requires a full application restart.
    * 
-   * **What it does:**
-   * 1. Validates DATABASE_URL is set
-   * 2. Creates database adapter for detected provider
-   * 3. Creates Prisma client with adapter
-   * 4. Connects with retry logic
-   * 5. Stores client and URL in memory
-   * 6. Marks as initialized (immutable)
+   * What it does:
+   * 1. Auto-syncs schema provider from DATABASE_URL
+   * 2. Validates DATABASE_URL is set
+   * 3. Creates database adapter for detected provider
+   * 4. Creates Prisma client with adapter
+   * 5. Connects with retry logic
+   * 6. Stores client and URL in memory
+   * 7. Marks as initialized (immutable)
    * 
    * @param logger - Fastify logger instance (required)
+   * @param dbUrl - Optional database URL override (defaults to process.env.DATABASE_URL)
    * @throws {Error} If DATABASE_URL is not set or connection fails
    * @throws {Error} If already initialized
-   * 
-   * @example
-   * ```typescript
-   * // In server.ts:
-   * await prismaManager.initialize(app.log);
-   * app.log.info('Database ready');
-   * ```
    */
   async initialize(logger: AppLogger, dbUrl?: string): Promise<void> {
     return this.mutex.runExclusive(async () => {
-      // Prevent re-initialization
       if (this.isInitialized) {
         logger.info('[Prisma Manager] Already initialized, skipping...');
         return;
       }
 
-      // Auto-sync schema
-    try {
-      logger.info('[Prisma Manager] Syncing schema provider...');
-      execSync('node prisma/sync-provider.js', { 
-        cwd: process.cwd(),
-        stdio: 'inherit' 
-      });
-    } catch (error) {
-      logger.warn('[Prisma Manager] Schema sync failed, continuing...');
-    }
+      // Auto-sync schema provider based on DATABASE_URL
+      try {
+        logger.info('[Prisma Manager] Syncing schema provider...');
+        execSync('node prisma/sync-provider.js', {
+          cwd: process.cwd(),
+          stdio: 'inherit',
+        });
+      } catch (error) {
+        logger.warn('[Prisma Manager] Schema sync failed, continuing...');
+      }
 
       // Validate DATABASE_URL exists
       const databaseUrl = dbUrl || process.env.DATABASE_URL;
@@ -120,7 +105,7 @@ class PrismaManager {
       logger.info('[Prisma Manager] Initializing client...');
 
       // Create adapter for detected database provider
-      const adapter = createAdapter(logger);
+      const adapter = createAdapter(logger, databaseUrl);
 
       // Create Prisma client with adapter
       const client = new PrismaClient({
@@ -178,18 +163,11 @@ class PrismaManager {
   /**
    * Get the current Prisma client instance.
    * 
-   * **Usage:** Call this in your routes/services whenever you need to access the database.
+   * Usage: Call this in your routes/services whenever you need to access the database.
    * 
    * @returns Prisma client instance
    * @throws {Error} If manager is not initialized
-   * 
-   * @example
-   * ```typescript
-   * const client = await prismaManager.getClient();
-   * const users = await client.user.findMany();
-   * ```
    */
-
   async getClient(): Promise<PrismaClient> {
     if (!this.client) {
       const error = '[Prisma Manager] ❌ Client not initialized. Call initialize(logger) first.';
@@ -221,7 +199,7 @@ class PrismaManager {
   /**
    * Increment active request counter.
    * 
-   * **Usage:** Called automatically by Fastify middleware on request start.
+   * Usage: Called automatically by Fastify middleware on request start.
    */
   incrementActiveRequests(): void {
     this.activeRequests++;
@@ -230,7 +208,7 @@ class PrismaManager {
   /**
    * Decrement active request counter.
    * 
-   * **Usage:** Called automatically by Fastify middleware on request completion.
+   * Usage: Called automatically by Fastify middleware on request completion.
    */
   decrementActiveRequests(): void {
     this.activeRequests = Math.max(0, this.activeRequests - 1);
@@ -248,22 +226,15 @@ class PrismaManager {
   /**
    * Gracefully disconnect client and reset state.
    * 
-   * **Called during shutdown** (SIGTERM/SIGINT) by the server.
+   * Called during shutdown (SIGTERM/SIGINT) by the server.
    * 
-   * **What it does:**
+   * What it does:
    * 1. Waits for active requests to complete (up to 10s)
    * 2. Disconnects Prisma client
    * 3. Resets all internal state
    * 4. Marks as uninitialized
    * 
    * @throws {Error} If disconnect fails
-   * 
-   * @example
-   * ```typescript
-   * // In server shutdown handler:
-   * await prismaManager.disconnect();
-   * app.log.info('Database disconnected');
-   * ```
    */
   async disconnect(): Promise<void> {
     return this.mutex.runExclusive(async () => {
@@ -314,8 +285,8 @@ class PrismaManager {
   /**
    * Reset manager to uninitialized state.
    * 
-   * **Use case:** Testing or emergency cleanup.
-   * In production, just call `disconnect()`.
+   * Use case: Testing or emergency cleanup.
+   * In production, just call disconnect().
    */
   async reset(): Promise<void> {
     await this.disconnect();
@@ -326,17 +297,6 @@ class PrismaManager {
 /**
  * Singleton instance of PrismaManager.
  * 
- * **This is the ONLY instance you should use throughout your application.**
- * 
- * @example
- * ```typescript
- * // In server.ts:
- * import { prismaManager } from './db/manager.js';
- * await prismaManager.initialize(app.log);
- * 
- * // In routes:
- * import { prismaManager } from './db/manager.js';
- * const client = await prismaManager.getClient();
- * ```
+ * This is the ONLY instance you should use throughout your application.
  */
 export const prismaManager = new PrismaManager();

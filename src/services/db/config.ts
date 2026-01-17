@@ -1,33 +1,33 @@
-// src/db/config.ts
-import { config as loadEnv } from 'dotenv';
+/**
+ * @fileoverview Database Configuration
+ * @module services/db/config
+ * 
+ * Detects database provider from DATABASE_URL and extracts connection details.
+ * 
+ * ENVIRONMENT-SPECIFIC BEHAVIOR:
+ * - Production: DATABASE_URL is REQUIRED, throws if missing
+ * - Test: Defaults to SQLite (file:./test.db) if not set
+ * - Development: Defaults to SQLite (file:./local.db) if not set
+ * 
+ * SUPPORTED URL FORMATS:
+ * - PostgreSQL: postgresql://user:pass@host:port/database
+ * - SQLite: file:./path/to/database.db
+ */
+
 import { URL } from 'url';
 import type { DbConfig, DbProvider, AppLogger } from './types.js';
 
-// Load environment variables
-loadEnv();
-
 /**
  * Detects database provider from DATABASE_URL and extracts connection details.
- * 
- * **Environment-specific behavior:**
- * - **Production**: DATABASE_URL is REQUIRED, throws if missing
- * - **Test**: Defaults to SQLite (file:./test.db) if not set
- * - **Development**: Defaults to SQLite (file:./local.db) if not set
- * 
- * **Supported URL formats:**
- * - PostgreSQL: `postgresql://user:pass@host:port/database`
- * - SQLite: `file:./path/to/database.db`
  * 
  * @param logger - Optional logger for warnings and info messages
  * @returns Parsed database configuration
  * @throws {Error} If DATABASE_URL is invalid or missing in production
  * 
  * @example
- * ```typescript
  * const config = detectProvider(logger);
  * console.log(config.provider); // 'postgresql'
  * console.log(config.connectionString); // Full URL
- * ```
  */
 export function detectProvider(logger?: AppLogger): DbConfig {
   const env = process.env.NODE_ENV || 'development';
@@ -157,12 +157,6 @@ function mapProtocolToProvider(protocol: string): DbProvider {
  * @param config - Database configuration to validate
  * @param logger - Optional logger for info messages
  * @throws {Error} If configuration is invalid for production
- * 
- * @example
- * ```typescript
- * const config = detectProvider(logger);
- * validateDbConfig(config, logger); // Throws if invalid
- * ```
  */
 export function validateDbConfig(config: DbConfig, logger?: AppLogger): void {
   const env = process.env.NODE_ENV || 'development';

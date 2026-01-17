@@ -1,192 +1,441 @@
-// This is your Prisma schema file
-// Learn more: https://pris.ly/d/prisma-schema
+// ============================================================================
+// CONSONANT LABS CONTROL PLANE - PRISMA SCHEMA
+// ============================================================================
+//
+// This schema defines the complete data model for the control plane.
+// It supports multi-tenancy, secure authentication, and time-series telemetry.
+//
+// Key Design Principles:
+// - Multi-database support (PostgreSQL, SQLite) via runtime adapter
+// - Organization-scoped data isolation
+// - Secure secret storage (bcrypt hashing)
+// - TimescaleDB hypertables for time-series data
+// - Optimized indexes for common query patterns
 
 generator client {
   provider = "prisma-client-js"
 }
 
 // ⚠️ DO NOT CHANGE THIS LINE MANUALLY
-// Managed by scripts/syncPrismaProvider.ts
+// Managed by scripts/sync-provider.js - detects from DATABASE_URL at runtime
 datasource db {
   provider = "postgresql"
 }
 
-model Cluster {
-  id         String        @id @default(cuid())
-  name       String        @unique
-  namespace  String
-  tokenHash  String
-  status     ClusterStatus @default(PENDING)
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
-  lastSeenAt DateTime?
+// ============================================================================
+// USER & ORGANIZATION MANAGEMENT
+// ============================================================================
 
-  kagentVersion String?
-  kagentConfig  Json?
+/// User account in the system
+/// Users belong to organizations and can have multiple API keys
+model User {
+  id           String               @id @default(uuid())
+  email        String               @unique
+  name         String?
+  passwordHash String?
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
 
-  socketId String? @unique
+  // Relations
+  organizations OrganizationMember[]
 
-  events    Event[]
-  agentRuns AgentRun[]
-
-  @@index([status])
-  @@index([lastSeenAt])
-  @@map("clusters")
+  @@index([email])
+  @@map("users")
 }
 
-enum ClusterStatus {
-  PENDING
-  ACTIVE
-  INACTIVE
-  FAILED
-}
-
-model Event {
-  id         String    @id @default(cuid())
-  agentId    String?
-  clusterId  String
-  type       EventType
-  payload    Json
-  receivedAt DateTime  @default(now())
-
-  cluster Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
-
-  @@index([clusterId, receivedAt(sort: Desc)])
-  @@index([type, receivedAt(sort: Desc)])
-  @@map("events")
-}
-
-enum EventType {
-  CLUSTER_ERROR
-  AGENT_TRACE
-  AGENT_FAILED
-  AGENT_DEPLOYED
-  AGENT_EVENT
-  K8S_EVENT
-  K8S_POD_STATUS
-  OTEL_TRACE
-  OTEL_METRIC
-  INVOKE_RESPONSE
-  INVOKE_ERROR
-}
-
-/// Represents a Terra agent definition and its lifecycle
-model Agent {
-  id        String      @id @default(uuid())
+/// Organization model for multi-tenancy
+/// All resources (clusters, API keys, telemetry) are scoped to organizations
+model Organization {
+  id        String   @id @default(uuid())
   name      String
-  clusterId String
-  status    AgentStatus @default(PENDING)
-
-  // Agent definitions
-  terraDefinition Json // Original Terra YAML as JSON
-  kagentCrd       Json? // Generated Kagent CRD as JSON
-
-  // Runtime configuration
-  image    String // Container image
-  replicas Int    @default(1)
-
-  // Resource limits (stored for quick access)
-  cpuRequest    String?
-  cpuLimit      String?
-  memoryRequest String?
-  memoryLimit   String?
-
-  // Deployment tracking
-  deploymentId String?   @unique
-  deployedAt   DateTime?
-
-  // Error tracking
-  error      String? // Last error message
-  errorCount Int     @default(0)
-
-  // Metadata
-  description String?
-  labels      Json?
-  annotations Json?
-
-  // Timestamps
+  slug      String   @unique
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // Relations
-  //cluster           Cluster     @relation(fields: [clusterId], references: [id], onDelete: Cascade)
-  //runs              AgentRun[]
-  //events            Event[]
+  members  OrganizationMember[]
+  apiKeys  ApiKey[]
+  clusters Cluster[]
 
-  @@unique([clusterId, name])
-  @@index([clusterId])
-  @@index([status])
-  @@index([createdAt])
+  @@index([slug])
+  @@map("organizations")
+}
+
+/// Many-to-many relationship between users and organizations
+model OrganizationMember {
+  id             String   @id @default(uuid())
+  userId         String
+  organizationId String
+  role           OrgRole  @default(MEMBER)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([userId])
+  @@index([organizationId])
+  @@map("organization_members")
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+// ============================================================================
+// API KEY MANAGEMENT
+// ============================================================================
+
+/// API key for REST API authentication
+/// CRITICAL: Keys are hashed with bcrypt before storage (never plaintext)
+/// Separate from cluster secrets - used only for REST API access
+model ApiKey {
+  id             String       @id @default(uuid())
+  organizationId String
+  name           String
+  keyHash        String // bcrypt hash of the actual API key
+  keyPrefix      String // First 8 chars of key for O(1) lookup
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  // Rate limiting metadata
+  rateLimit      Int          @default(100) // Requests per minute
+  rateLimitUsed  Int          @default(0)
+  rateLimitReset DateTime @default(now()) // When counter resets
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agents       Agent[]
+
+  @@index([organizationId])
+  @@index([keyPrefix]) // Performance optimization
+  @@index([keyHash])
+  @@index([expiresAt])
+  @@map("api_keys")
+}
+
+
+// ============================================================================
+// AGENT REGISTRY
+// ============================================================================
+
+/// Agent definition - stores metadata about agents that can be executed.
+/// Each agent defines a Docker container image and how to run it.
+/// This is a one-time registration, then the agent can be executed many times.
+model Agent {
+  id          String   @id @default(uuid())
+  apiKeyId    String   // Which API key (customer) owns this agent
+  name        String   // Human-readable name like "complaint-analyzer"
+  image       String   // Docker image URL: docker.io/company/agent:v1
+  description String?  // Optional description for documentation
+  
+  // Resource requirements (stored as JSON for flexibility)
+  // Example: {cpu: "2", memory: "4Gi", gpu: "1", timeout: "300s"}
+  resources   Json
+  
+  // Retry policy (stored as JSON)
+  // Example: {maxAttempts: 3, backoff: "exponential", initialDelay: "1s"}
+  retryPolicy Json
+  
+  // Optional advanced features
+  useAgentSandbox Boolean @default(false) // Enable gVisor kernel isolation
+  warmPoolSize    Int     @default(0)     // Pre-warmed instances (0 = disabled)
+  networkPolicy   String  @default("standard") // restricted, standard, unrestricted
+  
+  // Environment variables passed to agent container
+  environmentVariables Json? // {KEY: "value"}
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  apiKey     ApiKey      @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  executions Execution[]
+
+  @@unique([apiKeyId, name]) // Agent names must be unique per customer
+  @@index([apiKeyId])        // Fast lookup of all agents for an API key
   @@map("agents")
 }
 
-/// Agent lifecycle status tracking
-enum AgentStatus {
-  PENDING // Agent definition created, awaiting validation
-  VALIDATING // Structure and semantic validation in progress
-  CONVERTING // Converting Terra definition to Kagent CRD
-  DEPLOYING // Sending to cluster via mediator
-  ACTIVE // Successfully deployed and running
-  FAILED // Deployment or validation failed
-  UPDATING // Agent definition being updated
-  DELETING // Agent deletion in progress
-  DELETED // Agent successfully deleted
+// ============================================================================
+// CLUSTER MANAGEMENT
+// ============================================================================
+
+/// Kubernetes cluster registered with the control plane
+/// Clusters authenticate via cluster secrets (NOT API keys)
+/// Connection endpoint: consonantlabs.xyz/{orgId}/stream
+model Cluster {
+  id             String        @id @default(uuid())
+  organizationId String
+  name           String
+  namespace      String        @default("default")
+
+  // Cluster capabilities (stored as JSON)
+  // Example: {kubernetes: {version: "1.28"}, resources: {totalCpu: "32", totalMemory: "128Gi"}}
+  capabilities  Json
+  
+  // Cluster secret for gRPC authentication (bcrypt hashed)
+  secretHash     String
+  
+  status         ClusterStatus @default(PENDING)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  lastHeartbeat    DateTime? // Last time we heard from this cluster
+
+  // Relayer metadata
+  relayerVersion String?
+  relayerConfig  Json?
+
+  // gRPC stream tracking (ephemeral - not persisted to DB in production)
+  // In production, this is tracked in memory by the gRPC server
+  streamId         String?   // Internal ID for the active gRPC stream
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  executions   Execution[]
+
+  // Relations to telemetry data
+  traces         Trace[]
+  metrics        Metric[]
+  logs           Log[]
+  events         Event[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@index([status])
+  @@index([lastHeartbeat]) // Performance optimization
+  @@map("clusters")
 }
 
-model AgentRun {
-  id          String         @id @default(cuid())
-  clusterId   String
-  agentName   String
-  requestId   String         @unique
-  input       Json
-  parameters  Json?
-  status      AgentRunStatus @default(PENDING)
-  result      Json?
-  error       String?
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-  completedAt DateTime?
+enum ClusterStatus {
+  PENDING   // Registered but not connected
+  ACTIVE    // Currently connected via gRPC
+  INACTIVE  // Previously connected, now offline
+  FAILED    // Connection or configuration issues
+}
+
+
+// ============================================================================
+// EXECUTION TRACKING (HOT PATH - HIGHLY OPTIMIZED)
+// ============================================================================
+
+/// Execution record - tracks every time an agent runs.
+/// This is the CORE of the system and the hottest path in the database.
+/// The state machine: pending → queued → running → completed/failed
+///
+/// PERFORMANCE CRITICAL: This table receives:
+/// - High write volume (every execution creates a record)
+/// - High update volume (status changes multiple times per execution)  
+/// - High read volume (users query execution status)
+///
+/// OPTIMIZATION STRATEGY:
+/// - Minimal columns for fast writes
+/// - Strategic indexes for common queries
+/// - JSON for flexible data without schema changes
+/// - Use typed SQL ($queryRaw) for hot path queries
+model Execution {
+  id        String   @id @default(uuid())
+  agentId   String   // Which agent is being executed
+  clusterId String?  // Which cluster is running this execution (optional until selected)
+  
+  // Execution state machine
+  status    String   // pending, queued, running, completed, failed
+  
+  // Data flow
+  input     Json     // Input data passed to agent (from SDK)
+  result    Json?    // Output from agent (null until completed)
+  error     String?  // Error message if failed
+  
+  // Timing (critical for SLAs and billing)
+  createdAt    DateTime  @default(now()) // When SDK called execute()
+  queuedAt     DateTime? // When queued to cluster
+  startedAt    DateTime? // When agent actually started running
+  completedAt  DateTime? // When execution finished
+  durationMs   Int?      // Total execution time in milliseconds
+  
+  // Resource usage for billing (stored as JSON)
+  // Example: {cpuSeconds: 120, memoryMbSeconds: 48000, gpuSeconds: 60}
+  resourceUsage Json?
+  
+  // Retry tracking
+  attempt        Int    @default(1)    // Current attempt number (1 = first try)
+  maxAttempts    Int    @default(3)    // Max retries from agent's retry policy
+  nextRetryAt    DateTime? // When to retry if failed
+  
+  // Relations
+  agent   Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  cluster Cluster? @relation(fields: [clusterId], references: [id])
+  logs    Log[]   // One-to-many with log entries
+
+  // Strategic indexes for hot path queries
+  @@index([agentId, createdAt(sort: Desc)]) // "Show me recent executions for this agent"
+  @@index([clusterId, status])               // "Show me active executions on this cluster"
+  @@index([status, createdAt])               // "Show me all pending executions"
+  @@index([createdAt(sort: Desc)])           // "Show me recent executions" (global view)
+  @@map("executions")
+}
+
+// ============================================================================
+// TIME-SERIES TELEMETRY DATA (TimescaleDB Hypertables)
+// ============================================================================
+//
+// These models are designed to be TimescaleDB hypertables in production.
+// Partitioned by time and org_id for optimal query performance.
+//
+// To enable TimescaleDB (run after migrations):
+// SELECT create_hypertable('traces', 'timestamp');
+// SELECT create_hypertable('metrics', 'timestamp');
+// SELECT create_hypertable('logs', 'timestamp');
+
+/// Distributed trace span data
+/// Each span represents a single operation in a distributed system
+
+/// OpenTelemetry trace span from agent execution.
+/// Provides detailed execution timeline for debugging performance issues.
+/// Also stored in TimescaleDB hypertable.
+///
+/// TIMESCALEDB SETUP:
+/// SELECT create_hypertable('traces', 'timestamp', chunk_time_interval => INTERVAL '1 day');
+model Trace {
+  id             String   @id @default(uuid())
+  organizationId String
+  executionId String   // Which execution this trace belongs to
+  clusterId      String
+  traceId        String   // W3C Trace Context trace ID
+  spanId         String   // W3C Trace Context span ID
+  parentSpanId   String?  // Parent span ID for nested operations
+  name           String   // Span name (e.g., "GET /api/users")
+  kind           String   // Span kind: CLIENT, SERVER, PRODUCER, CONSUMER, INTERNAL
+  timestamp      DateTime // Span start time (used for partitioning)
+  duration       Int      // Duration in microseconds
+  statusCode     String?  // HTTP status code or gRPC status
+  statusMessage  String?  // Error message if failed
+  attributes     Json?    // Span attributes as JSON
+  events         Json?    // Span events (logs within span)
+  links          Json?    // Links to other spans
+  resource       Json?    // Resource attributes (service name, host, etc.)
 
   cluster Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
 
-  @@index([clusterId, status])
-  @@index([requestId])
-  @@index([status, createdAt(sort: Desc)])
-  @@map("agent_runs")
+  @@index([executionId, timestamp(sort: Desc)])
+  @@index([traceId, timestamp])
+  @@index([clusterId, timestamp(sort: Desc)])
+  @@index([name])
+  @@map("traces")
 }
 
-enum AgentRunStatus {
-  PENDING
-  RUNNING
-  COMPLETED
-  FAILED
-  TIMEOUT
+/// Time-series metric data points
+/// Supports gauges, counters, histograms, and summaries
+/// Resource usage metric from agent execution.
+/// Collected periodically during execution for billing and monitoring.
+/// Stored in TimescaleDB hypertable.
+///
+/// TIMESCALEDB SETUP:
+/// SELECT create_hypertable('metrics', 'timestamp', chunk_time_interval => INTERVAL '1 hour');
+model Metric {
+  id             String   @id @default(uuid())
+  organizationId String
+  executionId    String
+  clusterId      String
+  name           String   // Metric name (e.g., "http.server.request.duration")
+  type           String   // Metric type: GAUGE, COUNTER, HISTOGRAM, SUMMARY
+  timestamp      DateTime // Measurement timestamp (used for partitioning)
+  value          Float    // Metric value
+  unit           String?  // Unit (e.g., "ms", "bytes", "1")
+  attributes     Json?    // Metric attributes/labels as JSON
+  resource       Json?    // Resource attributes
+
+  cluster Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@index([executionId, timestamp(sort: Desc)])
+  @@index([clusterId, timestamp(sort: Desc)])
+  @@index([name])
+  @@map("metrics")
 }
 
+/// Structured log events
+/// Contains application logs, system logs, and audit logs
+model Log {
+  id             String   @id @default(uuid())
+  organizationId String
+  executionId String   // Which execution this log belongs to
+  clusterId      String
+  timestamp      DateTime // Log timestamp (used for partitioning)
+  severity       String   // Log level: TRACE, DEBUG, INFO, WARN, ERROR, FATAL
+  message        String   // Log message
+  traceId        String?  // Associated trace ID
+  spanId         String?  // Associated span ID
+  attributes     Json?    // Log attributes as JSON
+  resource       Json?    // Resource attributes
+   stream      String   // stdout or stderr
+  
+  // Optional structured data extracted from JSON logs
+  metadata    Json?    // Additional structured data if log is JSON
+  
+  // Relations
+  execution Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  cluster Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+   // TimescaleDB optimized indexes
+  @@index([executionId, timestamp(sort: Desc)]) // "Show me logs for this execution"
+  @@index([timestamp(sort: Desc)])              // "Show me recent logs"
+  @@index([severity, timestamp])                // "Show me all errors"
+  @@index([organizationId, timestamp(sort: Desc)])
+  @@index([clusterId, timestamp(sort: Desc)])
+  @@index([severity])
+  @@index([traceId])
+  @@map("logs")
+}
+
+// ============================================================================
+// JOB QUEUE METADATA
+// ============================================================================
+
+/// BullMQ job metadata for tracking async operations
+/// Jobs are stored in Redis, this table tracks completion status
 model Job {
-  id           String    @id @default(cuid())
-  type         JobType
-  payload      Json
-  status       JobStatus @default(PENDING)
-  attempts     Int       @default(0)
-  maxAttempts  Int       @default(3)
-  error        String?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  scheduledFor DateTime?
-  startedAt    DateTime?
-  completedAt  DateTime?
+  id          String    @id @default(uuid())
+  type        String    // Job type identifier
+  payload     Json      // Job parameters
+  status      JobStatus @default(PENDING)
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  error       String?
+  result      Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  startedAt   DateTime?
+  completedAt DateTime?
 
-  @@index([status, scheduledFor])
+  @@index([status])
   @@index([type, status])
+  @@index([createdAt])
   @@map("jobs")
 }
 
-enum JobType {
-  CLUSTER_REGISTRATION
-  AGENT_INVOCATION
-  CLUSTER_HEALTH_CHECK
-  EVENT_CLEANUP
+/// Generic event log for cluster and system events
+model Event {
+  id             String   @id @default(uuid())
+  eventId        String   @unique
+  clusterId      String
+  eventType      String
+  severity       String
+  source         String?
+  timestamp      DateTime @default(now())
+  payload        Json?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  cluster Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@index([clusterId, timestamp(sort: Desc)])
+  @@index([eventType, timestamp])
+  @@map("events")
 }
 
 enum JobStatus {
@@ -196,126 +445,3 @@ enum JobStatus {
   FAILED
   RETRYING
 }
-
-// ============================================================================
-// WORKFLOW ORCHESTRATION MODELS
-// ============================================================================
-
-/// Workflow state machine states
-/// Each state represents a deterministic checkpoint in the orchestration loop
-enum WorkflowStatus {
-  CREATED // Initial state when workflow is created
-  WAITING_ON_PLANNER // Waiting for LangGraph planning response
-  WAITING_ON_POLICY // Waiting for OPA policy decision
-  WAITING_ON_AGENT // Waiting for agent execution to complete
-  WAITING_ON_HUMAN // Human-in-the-loop approval required
-  PAUSED // Workflow manually paused
-  COMPLETED // Goal achieved successfully
-  FAILED // Workflow failed
-}
-
-/// Main workflow record
-/// Represents a single execution of Terra's orchestration engine from goal to completion
-model Workflow {
-  id      String @id @default(uuid())
-  goal    String // Natural language goal submitted by user
-  context String @default("") // added context to goal
-
-  // OpenTelemetry tracing
-  traceId    String  @unique // Trace ID for distributed tracing
-  rootSpanId String? // Root span for this workflow
-
-  // Timestamps
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  startedAt   DateTime? // When workflow transitioned to RUNNING
-  completedAt DateTime? // When workflow completed or failed
-  status      WorkflowStatus @default(CREATED)
-
-  // Relations
-  history WorkflowHistory[]
-  state   WorkflowState?
-  plan    WorkflowPlan?
-
-  @@index([status])
-  @@index([traceId])
-  @@index([createdAt])
-  @@map("workflows")
-}
-
-/// Append-only workflow history for deterministic replay
-/// Every state transition is recorded with full context
-model WorkflowHistory {
-  id         String @id @default(uuid())
-  workflowId String
-  sequence   Int // Monotonic sequence number for ordering
-
-  // State transition
-  previousStatus WorkflowStatus?
-  newStatus      WorkflowStatus
-
-  // Event that triggered this transition
-  eventType String // e.g., "workflow.created", "policy.evaluated"
-  eventData Json? // Full event payload for replay
-
-  // Decision record
-  reason         String? // Human-readable reason for transition
-  decision       String? // Decision made (e.g., "route_to_agent")
-  decisionInput  Json? // Input to decision
-  decisionOutput Json? // Output from decision
-
-  // OpenTelemetry tracing
-  spanId String? // Span ID for this history entry
-
-  // Timestamp
-  timestamp DateTime @default(now())
-
-  // Relation
-  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-
-  @@unique([workflowId, sequence])
-  @@index([workflowId, timestamp])
-  @@index([eventType])
-  @@map("workflow_history")
-}
-
-/// Current workflow state snapshot
-/// Stores mutable execution state separate from history
-model WorkflowState {
-  id         String @id @default(uuid())
-  workflowId String @unique
-
-  retryCount Int @default(0)
-  maxRetries Int @default(3)
-
-  // Error tracking
-  errors     String[] // Accumulated errors
-  errorCount Int      @default(0)
-
-  // Current execution state
-  lastAgentResult Json? // Last agent execution result
-  execContext     Json  @default("{}") // Accumulated execution context
-
-  // Execution tracking
-  currentStep Int @default(0)
-
-  // Replay support - last applied history sequence
-  lastHistorySeq Int @default(0)
-
-  // Optimistic locking
-  tick Int @default(1)
-
-  // Timestamps
-  updatedAt DateTime @updatedAt
-  workflow  Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-
-  @@map("workflow_states")
-}
-
-model WorkflowPlan {
-  id         String   @id @default(uuid())
-  workflow   Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-  workflowId String   @unique
-  plan       Json
-}
-

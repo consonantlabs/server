@@ -1,4 +1,20 @@
-// src/db/connection.ts
+/**
+ * @fileoverview Database Connection
+ * @module services/db/connection
+ * 
+ * Connects a Prisma client with exponential backoff retry logic.
+ * 
+ * RETRY STRATEGY:
+ * - Initial delay: 1 second
+ * - Exponential backoff: delay doubles each attempt
+ * - Max delay: 30 seconds
+ * - Max retries: 5 attempts
+ * 
+ * CONNECTION TESTING:
+ * - After successful connection, runs a test query (SELECT 1)
+ * - Ensures database is not just accepting connections but actually responding
+ */
+
 import { PrismaClient } from '@prisma/client';
 import { detectProvider } from './config.js';
 import type { ConnectionResult, AppLogger } from './types.js';
@@ -15,23 +31,12 @@ const MAX_DELAY_MS = 30000;
 /**
  * Connects a Prisma client with exponential backoff retry logic.
  * 
- * **Retry strategy:**
- * - Initial delay: 1 second
- * - Exponential backoff: delay doubles each attempt
- * - Max delay: 30 seconds
- * - Max retries: 5 attempts
- * 
- * **Connection testing:**
- * - After successful connection, runs a test query (SELECT 1)
- * - Ensures database is not just accepting connections but actually responding
- * 
  * @param client - Prisma client instance to connect
  * @param logger - Logger instance for diagnostic messages
  * @param maxRetries - Maximum number of connection attempts (default: 5)
  * @returns Connection result with success status and retry count
  * 
  * @example
- * ```typescript
  * const client = new PrismaClient({ adapter });
  * const result = await connectWithRetry(client, logger);
  * 
@@ -40,7 +45,6 @@ const MAX_DELAY_MS = 30000;
  * } else {
  *   console.error(`Failed: ${result.error}`);
  * }
- * ```
  */
 export async function connectWithRetry(
   client: PrismaClient,
@@ -111,10 +115,9 @@ export async function connectWithRetry(
 /**
  * Tests database connection with a provider-specific query.
  * 
- * **Test queries:**
- * - PostgreSQL: `SELECT 1`
- * - MySQL: `SELECT 1`
- * - SQLite: `SELECT 1`
+ * TEST QUERIES:
+ * - PostgreSQL: SELECT 1
+ * - SQLite: SELECT 1
  * 
  * @param client - Connected Prisma client
  * @param provider - Database provider type
@@ -140,20 +143,18 @@ async function testConnection(
 /**
  * Calculates exponential backoff delay for retry attempts.
  * 
- * **Formula:** min(INITIAL_DELAY * 2^attempt, MAX_DELAY)
+ * FORMULA: min(INITIAL_DELAY * 2^attempt, MAX_DELAY)
  * 
  * @param attempt - Current attempt number (0-indexed)
  * @returns Delay in milliseconds
  * 
  * @example
- * ```typescript
  * calculateBackoffDelay(0); // 1000ms (1s)
  * calculateBackoffDelay(1); // 2000ms (2s)
  * calculateBackoffDelay(2); // 4000ms (4s)
  * calculateBackoffDelay(3); // 8000ms (8s)
  * calculateBackoffDelay(4); // 16000ms (16s)
  * calculateBackoffDelay(5); // 30000ms (30s - capped)
- * ```
  */
 function calculateBackoffDelay(attempt: number): number {
   const exponentialDelay = INITIAL_DELAY_MS * Math.pow(2, attempt);
@@ -191,17 +192,15 @@ async function disconnectSafely(client: PrismaClient, logger: AppLogger): Promis
 /**
  * Gracefully disconnects a Prisma client.
  * 
- * **Use this for normal shutdowns**, not after failed connections.
+ * Use this for normal shutdowns, not after failed connections.
  * 
  * @param client - Prisma client to disconnect
  * @param logger - Logger instance
  * @throws {Error} If disconnect fails
  * 
  * @example
- * ```typescript
  * await disconnect(client, logger);
  * console.log('Database disconnected');
- * ```
  */
 export async function disconnect(client: PrismaClient, logger: AppLogger): Promise<void> {
   try {
@@ -217,7 +216,7 @@ export async function disconnect(client: PrismaClient, logger: AppLogger): Promi
 /**
  * Checks if a Prisma client is currently connected.
  * 
- * **Note:** This performs an actual database query to verify connectivity.
+ * Note: This performs an actual database query to verify connectivity.
  * 
  * @param client - Prisma client to check
  * @param logger - Logger instance
