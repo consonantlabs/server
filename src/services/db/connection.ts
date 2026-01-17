@@ -53,25 +53,25 @@ export async function connectWithRetry(
 ): Promise<ConnectionResult> {
   // Detect provider for logging
   const dbConfig = detectProvider(logger);
-  
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       logger.info(
         `[DB Connection] Attempt ${attempt + 1}/${maxRetries} to connect to ${dbConfig.provider}...`
       );
-      
+
       // Establish connection to database
       await client.$connect();
-      
+
       // Test the connection with a simple query
       await testConnection(client, dbConfig.provider, logger);
-      
+
       // Success!
       const retryMessage = attempt > 0 ? ` after ${attempt} retries` : '';
       logger.info(
         `[DB Connection] ✓ Connected to ${dbConfig.provider}${retryMessage}`
       );
-      
+
       return {
         success: true,
         client,
@@ -80,7 +80,7 @@ export async function connectWithRetry(
     } catch (error) {
       const isLastAttempt = attempt === maxRetries - 1;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      
+
       logger.error(
         `[DB Connection] Attempt ${attempt + 1}/${maxRetries} failed: ${errorMessage}`
       );
@@ -88,7 +88,7 @@ export async function connectWithRetry(
       // If this was the last attempt, give up
       if (isLastAttempt) {
         await disconnectSafely(client, logger);
-        
+
         return {
           success: false,
           error: errorMessage,
@@ -98,7 +98,7 @@ export async function connectWithRetry(
 
       // Calculate next retry delay with exponential backoff
       const delay = calculateBackoffDelay(attempt);
-      
+
       logger.info(`[DB Connection] Retrying in ${delay / 1000}s...`);
       await sleep(delay);
     }
@@ -126,7 +126,7 @@ export async function connectWithRetry(
  */
 async function testConnection(
   client: PrismaClient,
-  provider: string,
+  _provider: string,
   logger: AppLogger
 ): Promise<void> {
   try {
@@ -182,8 +182,8 @@ async function disconnectSafely(client: PrismaClient, logger: AppLogger): Promis
     await client.$disconnect();
     logger.info('[DB Connection] ✓ Disconnected after failed connection');
   } catch (disconnectError) {
-    const errorMessage = disconnectError instanceof Error 
-      ? disconnectError.message 
+    const errorMessage = disconnectError instanceof Error
+      ? disconnectError.message
       : 'Unknown error';
     logger.warn(`[DB Connection] Failed to disconnect: ${errorMessage}`);
   }

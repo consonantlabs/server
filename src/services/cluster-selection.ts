@@ -15,7 +15,7 @@
 import { PrismaClient, Cluster } from '@prisma/client';
 import { logger } from '../utils/logger.js';
 import { getWorkQueue } from './redis/queue.js';
-import type { AgentConfig } from '../inngest/events.js';
+import type { AgentConfig } from './inngest/events.js';
 
 /**
  * Cluster capabilities structure (stored as JSON in database).
@@ -147,7 +147,7 @@ export class ClusterSelectionService {
     preferences?: SelectionPreferences
   ): Cluster[] {
     return clusters.filter(cluster => {
-      const capabilities = cluster.capabilities as ClusterCapabilities;
+      const capabilities = cluster.capabilities as any as ClusterCapabilities;
 
       // Check GPU requirement
       if (preferences?.requireGpu || agentConfig.resources?.gpu) {
@@ -231,7 +231,7 @@ export class ClusterSelectionService {
 
       // Factor 3: Region preference
       if (preferences?.preferredRegion) {
-        const capabilities = cluster.capabilities as ClusterCapabilities;
+        const capabilities = cluster.capabilities as any as ClusterCapabilities;
         if (capabilities.region === preferences.preferredRegion) {
           score += 20; // Bonus for region match
         }
@@ -276,7 +276,7 @@ export class ClusterSelectionService {
     capabilities: ClusterCapabilities;
   }>> {
     const clusters = await this.prisma.cluster.findMany({
-      where: { apiKeyId },
+      where: { organizationId: apiKeyId },
     });
 
     const workQueue = getWorkQueue();
@@ -291,7 +291,7 @@ export class ClusterSelectionService {
         status: cluster.status,
         queueDepth,
         lastHeartbeat: cluster.lastHeartbeat,
-        capabilities: cluster.capabilities as ClusterCapabilities,
+        capabilities: cluster.capabilities as any as ClusterCapabilities,
       });
     }
 

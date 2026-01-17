@@ -119,7 +119,7 @@ export type ConsonantEvents = {
   'agent.updated': {
     data: {
       agentId: string;
-      apiKeyHash: string;
+      apiKeyId: string;
       changes: Partial<AgentConfig>;
       updatedAt: string;
     };
@@ -132,7 +132,7 @@ export type ConsonantEvents = {
   'agent.deleted': {
     data: {
       agentId: string;
-      apiKeyHash: string;
+      apiKeyId: string;
       deletedAt: string;
     };
   };
@@ -461,33 +461,6 @@ export type ConsonantEvents = {
     };
   };
 
-  /**
-   * API key events.
-   */
-  'apikey.created': {
-    data: {
-      organizationId: string;
-      keyId: string;
-      name: string;
-      timestamp: string;
-    };
-  };
-
-  'apikey.rotated': {
-    data: {
-      organizationId: string;
-      keyId: string;
-      timestamp: string;
-    };
-  };
-
-  'apikey.revoked': {
-    data: {
-      organizationId: string;
-      keyId: string;
-      timestamp: string;
-    };
-  };
 };
 
 /**

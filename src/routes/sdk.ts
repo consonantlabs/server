@@ -207,10 +207,10 @@ export async function registerApiRoutes(fastify: FastifyInstance) {
                 data: {
                     executionId,
                     agentId: agent.id,
-                    apiKeyHash: apiKeyId, // We use apiKeyId here as the customer identifier
+                    apiKeyId: apiKeyId as string,
                     input: input as any,
-                    priority: priority || 'normal',
-                    cluster,
+                    priority: (priority as any) || 'normal',
+                    cluster: cluster as string,
                     requestedAt: new Date().toISOString(),
                 },
             });
@@ -373,7 +373,7 @@ export async function registerApiRoutes(fastify: FastifyInstance) {
                 name: 'agent.deleted',
                 data: {
                     agentId,
-                    apiKeyId: apiKeyId,
+                    apiKeyId: apiKeyId as string,
                     deletedAt: new Date().toISOString(),
                 },
             });

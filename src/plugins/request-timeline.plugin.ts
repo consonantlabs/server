@@ -29,7 +29,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import fp from 'fastify-plugin';
 import { contextManager } from '@/utils/context.js';
-import { generateUUID } from '@/utils/crypto.js';
 import { logger } from '@/utils/logger.js';
 import { sendEvent } from '@/services/inngest/client.js';
 
@@ -39,16 +38,16 @@ import { sendEvent } from '@/services/inngest/client.js';
 interface TimelineEvent {
   /** Event name (e.g., 'database.query', 'middleware.auth') */
   name: string;
-  
+
   /** Event start time (high-resolution timestamp) */
   startTime: number;
-  
+
   /** Event end time (high-resolution timestamp) */
   endTime: number;
-  
+
   /** Duration in milliseconds */
   duration: number;
-  
+
   /** Additional metadata about the event */
   metadata?: Record<string, any>;
 }
@@ -59,37 +58,37 @@ interface TimelineEvent {
 interface RequestTimeline {
   /** Unique request ID */
   requestId: string;
-  
+
   /** Trace ID for distributed tracing correlation */
   traceId: string;
-  
+
   /** Organization ID (if authenticated) */
   organizationId?: string;
-  
+
   /** HTTP method */
   method: string;
-  
+
   /** URL path */
   path: string;
-  
+
   /** Query parameters */
   query?: Record<string, any>;
-  
+
   /** Response status code */
   statusCode: number;
-  
+
   /** Request start time */
   startTime: number;
-  
+
   /** Request end time */
   endTime: number;
-  
+
   /** Total duration in milliseconds */
   duration: number;
-  
+
   /** Individual timeline events */
   events: TimelineEvent[];
-  
+
   /** Timestamp for database storage */
   timestamp: Date;
 }
@@ -108,7 +107,7 @@ declare module 'fastify' {
       startTime: number;
       events: TimelineEvent[];
     };
-    
+
     /**
      * Add an event to the request timeline.
      * 
@@ -123,7 +122,7 @@ declare module 'fastify' {
       endTime: number,
       metadata?: Record<string, any>
     ): void;
-    
+
     /**
      * Start timing an operation.
      * Returns a function to call when the operation completes.
@@ -152,14 +151,14 @@ declare module 'fastify' {
  */
 async function requestTimelinePlugin(app: FastifyInstance): Promise<void> {
   // Decorate request with timeline tracking
-  app.decorateRequest('timeline', null);
-  app.decorateRequest('addTimelineEvent', null);
-  app.decorateRequest('startTiming', null);
+  app.decorateRequest('timeline', null as any);
+  app.decorateRequest('addTimelineEvent', null as any);
+  app.decorateRequest('startTiming', null as any);
 
   /**
    * Initialize timeline on request start.
    */
-  app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.addHook('onRequest', async (request: FastifyRequest, _reply: FastifyReply) => {
     const requestId = request.id;
     const startTime = performance.now();
 
@@ -189,7 +188,7 @@ async function requestTimelinePlugin(app: FastifyInstance): Promise<void> {
     // Add convenience method to start timing
     request.startTiming = (name: string, metadata?: Record<string, any>) => {
       const eventStartTime = performance.now();
-      
+
       return () => {
         const eventEndTime = performance.now();
         request.addTimelineEvent(name, eventStartTime, eventEndTime, metadata);
@@ -249,7 +248,7 @@ async function requestTimelinePlugin(app: FastifyInstance): Promise<void> {
         data: {
           timeline,
           timestamp: new Date().toISOString(),
-        },
+        } as any,
       });
     } catch (error) {
       // Don't block response if timeline storage fails

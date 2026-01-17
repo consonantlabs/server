@@ -1,3 +1,4 @@
+// @ts-ignore
 import type { Event } from '@consonant/proto-relayer';
 import { logger } from '../../../utils/logger.js';
 import { prismaManager } from '../../db/manager.js';
@@ -101,7 +102,7 @@ export class EventHandler {
    */
   private async handleConnectionEvent(
     clusterId: string,
-    event: Event,
+    _event: Event,
     state: string
   ): Promise<void> {
     try {

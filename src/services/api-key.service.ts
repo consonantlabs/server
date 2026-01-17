@@ -7,8 +7,8 @@
  */
 
 import { PrismaClient, ApiKey } from '@prisma/client';
-import { generateSecureToken, hashSecret } from '../../utils/crypto.js';
-import { logger } from '../../utils/logger.js';
+import { generateSecureToken, hashSecret } from '../utils/crypto.js';
+import { logger } from '../utils/logger.js';
 
 export interface CreateApiKeyOptions {
     organizationId: string;

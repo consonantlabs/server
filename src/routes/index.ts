@@ -24,8 +24,8 @@ import type { FastifyInstance } from 'fastify';
 import { authenticateApiKey } from '@/middleware/auth.middleware.js';
 import { authenticateJWT } from '@/middleware/jwt-auth.middleware.js';
 import { authRoutes } from './auth.route.js';
-import { organizationRoutes } from './organizations.route.js';
-import { dashboardRoutes } from './dashboard.route.js';
+// import { organizationRoutes } from './organizations.route.js';
+// import { dashboardRoutes } from './dashboard.route.js';
 import { apiKeyRoutes } from './api-keys.route.js';
 import { clusterRoutes } from './clusters.route.js';
 import { telemetryRoutes } from './telemetry.route.js';
@@ -65,8 +65,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // Apply JWT authentication to all organization routes
       orgScope.addHook('preHandler', authenticateJWT);
 
-      await orgScope.register(organizationRoutes);
-      await orgScope.register(dashboardRoutes);
+      // await orgScope.register(organizationRoutes);
+      // await orgScope.register(dashboardRoutes);
     });
 
     // ========================================================================

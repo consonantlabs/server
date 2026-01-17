@@ -1,7 +1,7 @@
 import * as grpc from '@grpc/grpc-js';
 import { logger } from '../../../utils/logger.js';
 
-export const loggingInterceptor: grpc.Interceptor = (
+export const loggingInterceptor: grpc.Interceptor = ((
   options: grpc.InterceptorOptions,
   nextCall: (options: grpc.InterceptorOptions) => grpc.InterceptingCall
 ) => {
@@ -27,4 +27,4 @@ export const loggingInterceptor: grpc.Interceptor = (
       });
     }
   });
-};
+}) as any;

@@ -30,6 +30,7 @@
  */
 
 import { logger } from '../../utils/logger.js';
+// @ts-ignore
 import type { KagentCRD } from '../../types/agentManifest.js';
 
 // ============================================================================

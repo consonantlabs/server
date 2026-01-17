@@ -36,7 +36,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/auth/login', login);
 
   // Authenticated routes - require JWT token
-  app.get('/auth/me', { preHandler: authenticateJWT }, getCurrentUser);
-  app.patch('/auth/me', { preHandler: authenticateJWT }, updateProfile);
-  app.post('/auth/change-password', { preHandler: authenticateJWT }, changePassword);
+  app.get('/auth/me', { preHandler: authenticateJWT }, getCurrentUser as any);
+  app.patch('/auth/me', { preHandler: authenticateJWT }, updateProfile as any);
+  app.post('/auth/change-password', { preHandler: authenticateJWT }, changePassword as any);
 }

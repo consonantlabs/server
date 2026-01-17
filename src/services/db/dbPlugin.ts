@@ -59,7 +59,7 @@ const dbPlugin: FastifyPluginAsync = async (fastify: FastifyInstance) => {
    * Runs before every request handler to ensure database is initialized.
    * Returns 503 Service Unavailable if database is not ready.
    */
-  fastify.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
+  fastify.addHook('preHandler', async (_request: FastifyRequest, reply: FastifyReply) => {
     try {
       // Check if database is initialized
       if (!prismaManager.isReady()) {
@@ -68,7 +68,7 @@ const dbPlugin: FastifyPluginAsync = async (fastify: FastifyInstance) => {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      logger.error({error},'[DB Plugin] ❌ Database initialization failed');
+      logger.error({ error }, '[DB Plugin] ❌ Database initialization failed');
 
       return reply.status(503).send({
         error: 'Service Unavailable',
@@ -109,7 +109,7 @@ const dbPlugin: FastifyPluginAsync = async (fastify: FastifyInstance) => {
       request.prisma = client;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      logger.error({error}, '[DB Plugin] ❌ Failed to attach Prisma client');
+      logger.error({ error }, '[DB Plugin] ❌ Failed to attach Prisma client');
       throw new Error(`Database connection failed: ${errorMessage}`);
     }
   });
@@ -182,7 +182,7 @@ const dbPlugin: FastifyPluginAsync = async (fastify: FastifyInstance) => {
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      logger.error({error}, '[DB Plugin] ❌ Health check failed');
+      logger.error({ error }, '[DB Plugin] ❌ Health check failed');
 
       return reply.status(503).send({
         status: 'unhealthy',

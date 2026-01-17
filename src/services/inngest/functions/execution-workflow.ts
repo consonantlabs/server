@@ -57,7 +57,7 @@ export const executionWorkflow = inngest.createFunction(
     // Trigger: When SDK calls execute()
     { event: 'agent.execution.requested' },
     async ({ event, step }) => {
-        const { executionId, agentId, apiKeyHash: apiKeyId, input, priority, cluster: preferredCluster } = event.data;
+        const { executionId, agentId, apiKeyId, input, priority, cluster: preferredCluster } = event.data;
 
         logger.info({
             executionId,

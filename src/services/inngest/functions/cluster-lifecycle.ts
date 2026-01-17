@@ -33,17 +33,14 @@ export const handleClusterConnected = inngest.createFunction(
   async ({ event, step }) => {
     const {
       clusterId,
-      apiKeyId, // Use apiKeyId
       capabilities,
       relayerVersion,
-      connectedAt: timestamp, // Use connectedAt as timestamp
+      connectedAt: timestamp,
     } = event.data;
 
     logger.info(
       {
-        organizationId,
         clusterId,
-        clusterName,
       },
       'Handling cluster connection'
     );
@@ -179,7 +176,7 @@ export const handleClusterHeartbeat = inngest.createFunction(
     return {
       success: true,
       clusterId,
-      timestamp,
+      timestamp: heartbeatAt,
     };
   }
 );
@@ -197,15 +194,14 @@ export const handleClusterError = inngest.createFunction(
     retries: 2,
   },
   { event: EVENT_TYPES.CLUSTER_ERROR },
-  async ({ event, step }) => {
+  async ({ event }) => {
     const { clusterId, error, timestamp } = event.data as any;
 
     logger.error(
       {
-        organizationId,
         clusterId,
         error,
-        stack,
+        timestamp,
       },
       'Cluster reported error'
     );

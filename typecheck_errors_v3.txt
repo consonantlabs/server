@@ -1,6 +1,0 @@
-
-> @consonantlabs/control-plane@1.0.0 typecheck
-> tsc --noEmit
-
-src/middleware/api-key-auth.middleware.ts(196,3): error TS1005: 'try' expected.
-src/middleware/api-key-auth.middleware.ts(206,1): error TS1128: Declaration or statement expected.

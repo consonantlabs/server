@@ -157,7 +157,7 @@ async function registerCluster(
       name: 'cluster.connected',
       data: {
         clusterId: cluster_id,
-        apiKeyHash: apiKey.keyHash,
+        apiKeyId: apiKey.id,
         capabilities: capabilities as any,
         relayerVersion: relayer_version,
         connectedAt: new Date().toISOString(),
@@ -216,14 +216,14 @@ function streamWork(call: grpc.ServerDuplexStream<any, any>) {
         await handleHeartbeat(call, message.heartbeat);
 
         // Store cluster ID from first heartbeat
-        if (!clusterId) {
+        if (!clusterId && message.heartbeat.cluster_id) {
           clusterId = message.heartbeat.cluster_id;
-          activeStreams.set(clusterId, call);
+          activeStreams.set(clusterId as string, call);
 
           logger.info({ clusterId }, 'Cluster stream registered');
 
           // Start work distribution loop for this cluster
-          startWorkDistribution(call, clusterId);
+          startWorkDistribution(call, clusterId as string);
         }
       } else if (message.execution_status) {
         await handleExecutionStatus(message.execution_status);
@@ -322,7 +322,7 @@ function startWorkDistribution(stream: grpc.ServerDuplexStream<any, any>, cluste
  * Handle heartbeat message from relayer.
  * Updates cluster's last heartbeat timestamp and status.
  */
-async function handleHeartbeat(stream: grpc.ServerDuplexStream<any, any>, heartbeat: any) {
+async function handleHeartbeat(_stream: grpc.ServerDuplexStream<any, any>, heartbeat: any) {
   const { cluster_id, status } = heartbeat;
 
   try {
@@ -598,7 +598,7 @@ export async function startGrpcServer(port: number = 50051): Promise<grpc.Server
   });
 
   // Bind and start
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     // Determine credentials based on environment
     let credentials: grpc.ServerCredentials;
 

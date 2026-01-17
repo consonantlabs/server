@@ -1,7 +1,7 @@
 import * as grpc from '@grpc/grpc-js';
 import { logger } from '../../../utils/logger.js';
 
-export const errorInterceptor: grpc.Interceptor = (
+export const errorInterceptor: grpc.Interceptor = ((
   options: grpc.InterceptorOptions,
   nextCall: (options: grpc.InterceptorOptions) => grpc.InterceptingCall
 ) => {
@@ -11,7 +11,7 @@ export const errorInterceptor: grpc.Interceptor = (
         ...listener,
         onReceiveStatus: (status, next) => {
           if (status.code !== grpc.status.OK) {
-            logger.error( {
+            logger.error({
               method: options.method_definition.path,
               code: status.code,
               message: status.details
@@ -22,4 +22,4 @@ export const errorInterceptor: grpc.Interceptor = (
       });
     }
   });
-};
+}) as any;

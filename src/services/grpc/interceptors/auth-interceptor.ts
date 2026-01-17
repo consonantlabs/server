@@ -1,6 +1,6 @@
 import * as grpc from '@grpc/grpc-js';
 import { logger } from '../../../utils/logger.js';
-import { prisma } from '../../db/index.js';
+import { prismaManager } from '../../db/index.js';
 import { timingSafeEqual } from '@/utils/crypto.js';
 
 /**
@@ -15,7 +15,7 @@ import { timingSafeEqual } from '@/utils/crypto.js';
  * 3. Compare provided token with stored token (secure hash comparison)
  * 4. Allow or deny based on validation result
  */
-export const authInterceptor: grpc.Interceptor = (
+export const authInterceptor: grpc.Interceptor = ((
   options: grpc.InterceptorOptions,
   nextCall: (options: grpc.InterceptorOptions) => grpc.InterceptingCall
 ) => {
@@ -35,7 +35,8 @@ export const authInterceptor: grpc.Interceptor = (
           name: 'UNAUTHENTICATED',
           message: 'Missing cluster credentials',
           code: grpc.status.UNAUTHENTICATED,
-          details: 'Provide cluster-id and cluster-token in metadata'
+          details: 'Provide cluster-id and cluster-token in metadata',
+          metadata: new grpc.Metadata()
         };
         
         listener.onReceiveStatus(error);
@@ -43,19 +44,22 @@ export const authInterceptor: grpc.Interceptor = (
       }
 
       // Validate credentials against database
-      prisma.cluster.findUnique({
-        where: { id: clusterId },
-        select: { id: true, tokenHash: true, status: true }
+      prismaManager.getClient().then(prisma => {
+        return prisma.cluster.findUnique({
+          where: { id: clusterId },
+          select: { id: true, secretHash: true, status: true }
+        });
       })
-      .then(cluster => {
+      .then((cluster: any) => {
         if (!cluster) {
-          logger.warn( { clusterId }, '[AuthInterceptor] Cluster not found');
+          logger.warn({ clusterId }, '[AuthInterceptor] Cluster not found');
           
           const error: grpc.ServiceError = {
             name: 'UNAUTHENTICATED',
             message: 'Invalid cluster ID',
             code: grpc.status.UNAUTHENTICATED,
-            details: `Cluster ${clusterId} not found`
+            details: `Cluster ${clusterId} not found`,
+            metadata: new grpc.Metadata()
           };
           
           listener.onReceiveStatus(error);
@@ -64,18 +68,19 @@ export const authInterceptor: grpc.Interceptor = (
 
         // Secure token comparison (constant-time to prevent timing attacks)
         const tokenMatches = timingSafeEqual(
-          cluster.tokenHash,
+          cluster.secretHash,
           clusterToken
         );
 
         if (!tokenMatches) {
-          logger.warn('[AuthInterceptor] Invalid token', { clusterId });
+          logger.warn({ clusterId }, '[AuthInterceptor] Invalid token');
           
           const error: grpc.ServiceError = {
             name: 'UNAUTHENTICATED',
             message: 'Invalid cluster token',
             code: grpc.status.UNAUTHENTICATED,
-            details: 'Provided token does not match'
+            details: 'Provided token does not match',
+            metadata: new grpc.Metadata()
           };
           
           listener.onReceiveStatus(error);
@@ -90,7 +95,7 @@ export const authInterceptor: grpc.Interceptor = (
         // Authentication successful - proceed with call
         next(metadata, listener);
       })
-      .catch(error => {
+      .catch((error: any) => {
         logger.error({
           error,
           clusterId
@@ -100,12 +105,12 @@ export const authInterceptor: grpc.Interceptor = (
           name: 'INTERNAL',
           message: 'Authentication system error',
           code: grpc.status.INTERNAL,
-          details: error instanceof Error ? error.message : 'Unknown error'
+          details: error instanceof Error ? error.message : 'Unknown error',
+          metadata: new grpc.Metadata()
         };
         
         listener.onReceiveStatus(grpcError);
       });
     }
   });
-};
-
+}) as any;

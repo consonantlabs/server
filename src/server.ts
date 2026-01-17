@@ -243,7 +243,7 @@ async function registerRoutes(app: FastifyInstance): Promise<void> {
  * propagates through all async operations.
  */
 function setupContextInjection(app: FastifyInstance): void {
-  app.addHook('onRequest', (request, reply, done) => {
+  app.addHook('onRequest', (request, _reply, done) => {
     const traceId = (request.headers['x-trace-id'] as string) || generateTraceId();
     const requestId = request.id;
 
@@ -297,12 +297,12 @@ function setupErrorHandler(app: FastifyInstance): void {
       err: error,
     }, 'Request error');
 
-    const statusCode = error.statusCode || 500;
+    const statusCode = (error as any).statusCode || 500;
     const errorResponse = {
       success: false,
-      error: isDevelopment() ? error.name : 'Internal Server Error',
-      message: error.message,
-      ...(isDevelopment() && { stack: error.stack }),
+      error: isDevelopment() ? (error as any).name : 'Internal Server Error',
+      message: (error as any).message,
+      ...(isDevelopment() && { stack: (error as any).stack }),
     };
 
     reply.status(statusCode).send(errorResponse);
@@ -325,7 +325,7 @@ function setupErrorHandler(app: FastifyInstance): void {
  * 6. Exit process
  */
 function setupGracefulShutdown(app: FastifyInstance): void {
-  const gracefulShutdown = closeWithGrace(
+  closeWithGrace(
     { delay: TIMEOUTS.SHUTDOWN_MS },
     async ({ signal, err }) => {
       if (err) {
