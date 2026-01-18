@@ -2,6 +2,8 @@ import { inngest } from '../client.js';
 import { getAgentService } from '../../agent.service.js';
 import { logger } from '../../../utils/logger.js';
 import { prismaManager } from '../../db/manager.js';
+import type { Agent } from '@prisma/client';
+import type { AgentConfig } from '../events.js';
 
 /**
  * Async Workflow for Agent Registration.
@@ -25,10 +27,10 @@ export const registrationWorkflow = inngest.createFunction(
         }, 'Processing async registration');
 
         // Step 1: Validated DB Upsert
-        const result = await step.run('upsert-agent-db', async () => {
+        const result = await step.run('upsert-agent-db', async (): Promise<{ agent: Agent; action: 'created' | 'updated' | 'unchanged' }> => {
             // Logic moved from API -> Here
             // This ensures retries on DB failure
-            return await agentService.registerOrUpdate(organizationId, config);
+            return await agentService.registerOrUpdate(organizationId, config as AgentConfig);
         });
 
         // Step 2: Audit Logging

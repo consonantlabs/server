@@ -1,7 +1,7 @@
 import * as grpc from '@grpc/grpc-js';
 import { logger } from '../../../utils/logger.js';
-import { prismaManager } from '../../db/index.js';
-import { timingSafeEqual } from '@/utils/crypto.js';
+import { prismaManager } from '../../db/manager.js';
+import { verifySecret } from '@/utils/crypto.js';
 
 /**
  * Authentication Interceptor
@@ -15,102 +15,95 @@ import { timingSafeEqual } from '@/utils/crypto.js';
  * 3. Compare provided token with stored token (secure hash comparison)
  * 4. Allow or deny based on validation result
  */
-export const authInterceptor: grpc.Interceptor = ((
-  options: grpc.InterceptorOptions,
-  nextCall: (options: grpc.InterceptorOptions) => grpc.InterceptingCall
-) => {
+export const authInterceptor: grpc.Interceptor = ((options: any, nextCall: any) => {
   return new grpc.InterceptingCall(nextCall(options), {
     start: (metadata, listener, next) => {
-      // Extract credentials from metadata
-      const clusterId = metadata.get('cluster-id')[0] as string | undefined;
-      const clusterToken = metadata.get('cluster-token')[0] as string | undefined;
+      const methodPath = options.method_definition.path;
+      const isRegistering = methodPath.includes('RegisterCluster');
 
-      if (!clusterId || !clusterToken) {
-        logger.warn( {
-          hasClusterId: !!clusterId,
-          hasClusterToken: !!clusterToken
+      // Extract credentials from metadata
+      const apiKey = metadata.get('x-api-key')[0] as string | undefined;
+      const clusterId = metadata.get('cluster-id')[0] as string | undefined;
+
+      if (!apiKey || (!isRegistering && !clusterId)) {
+        logger.warn({
+          methodPath,
+          hasApiKey: !!apiKey,
+          hasClusterId: !!clusterId
         }, '[AuthInterceptor] Missing credentials');
-        
+
         const error: grpc.ServiceError = {
           name: 'UNAUTHENTICATED',
-          message: 'Missing cluster credentials',
+          message: 'Missing credentials',
           code: grpc.status.UNAUTHENTICATED,
-          details: 'Provide cluster-id and cluster-token in metadata',
+          details: isRegistering ? 'Provide x-api-key in metadata' : 'Provide x-api-key and cluster-id in metadata',
           metadata: new grpc.Metadata()
         };
-        
+
         listener.onReceiveStatus(error);
         return;
       }
 
       // Validate credentials against database
-      prismaManager.getClient().then(prisma => {
-        return prisma.cluster.findUnique({
-          where: { id: clusterId },
-          select: { id: true, secretHash: true, status: true }
+      prismaManager.getClient().then(async (prisma) => {
+        // 1. Authenticate API Key first
+        const keyPrefix = apiKey.substring(0, 8);
+        const apiKeys = await prisma.apiKey.findMany({
+          where: { keyPrefix, revokedAt: null }
         });
-      })
-      .then((cluster: any) => {
-        if (!cluster) {
-          logger.warn({ clusterId }, '[AuthInterceptor] Cluster not found');
-          
-          const error: grpc.ServiceError = {
-            name: 'UNAUTHENTICATED',
-            message: 'Invalid cluster ID',
-            code: grpc.status.UNAUTHENTICATED,
-            details: `Cluster ${clusterId} not found`,
-            metadata: new grpc.Metadata()
-          };
-          
-          listener.onReceiveStatus(error);
-          return;
+
+        let validKey = null;
+        for (const key of apiKeys) {
+          if (await verifySecret(apiKey, key.keyHash)) {
+            validKey = key;
+            break;
+          }
         }
 
-        // Secure token comparison (constant-time to prevent timing attacks)
-        const tokenMatches = timingSafeEqual(
-          cluster.secretHash,
-          clusterToken
-        );
-
-        if (!tokenMatches) {
-          logger.warn({ clusterId }, '[AuthInterceptor] Invalid token');
-          
-          const error: grpc.ServiceError = {
-            name: 'UNAUTHENTICATED',
-            message: 'Invalid cluster token',
-            code: grpc.status.UNAUTHENTICATED,
-            details: 'Provided token does not match',
-            metadata: new grpc.Metadata()
-          };
-          
-          listener.onReceiveStatus(error);
-          return;
+        if (!validKey) {
+          throw new Error('Invalid API Key');
         }
 
-        logger.info( {
-          clusterId,
-          status: cluster.status
-        },'[AuthInterceptor] Authentication successful');
+        // 2. For non-registration calls, ensure cluster exists and belongs to organization
+        if (!isRegistering) {
+          const cluster = await prisma.cluster.findFirst({
+            where: { id: clusterId, organizationId: validKey.organizationId },
+            select: { id: true, secretHash: true, status: true }
+          });
 
-        // Authentication successful - proceed with call
-        next(metadata, listener);
+          if (!cluster) {
+            throw new Error(`Cluster ${clusterId} not found or access denied`);
+          }
+        }
+
+        return { validKey };
       })
-      .catch((error: any) => {
-        logger.error({
-          error,
-          clusterId
-        }, '[AuthInterceptor] Database error');
-        
-        const grpcError: grpc.ServiceError = {
-          name: 'INTERNAL',
-          message: 'Authentication system error',
-          code: grpc.status.INTERNAL,
-          details: error instanceof Error ? error.message : 'Unknown error',
-          metadata: new grpc.Metadata()
-        };
-        
-        listener.onReceiveStatus(grpcError);
-      });
+        .then(() => {
+          logger.info({
+            methodPath,
+            clusterId
+          }, '[AuthInterceptor] Authentication successful');
+
+          // Authentication successful - proceed with call
+          next(metadata, listener);
+        })
+        .catch((error: any) => {
+          logger.warn({
+            methodPath,
+            error: error.message,
+            clusterId
+          }, '[AuthInterceptor] Auth failed');
+
+          const grpcError: grpc.ServiceError = {
+            name: 'UNAUTHENTICATED',
+            message: 'Authentication failed',
+            code: grpc.status.UNAUTHENTICATED,
+            details: error.message,
+            metadata: new grpc.Metadata()
+          };
+
+          listener.onReceiveStatus(grpcError);
+        });
     }
   });
-}) as any;
+});

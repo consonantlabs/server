@@ -39,7 +39,6 @@ import { redisClient } from './services/redis/client.js';
 import { inngest } from './services/inngest/client.js';
 import { allFunctions } from './services/inngest/functions/registry.js';
 import { startGrpcServer } from './services/grpc/server.js';
-import { initWorkQueue } from './services/redis/queue.js';
 
 let grpcServer: any;
 
@@ -337,7 +336,8 @@ function setupErrorHandler(app: FastifyInstance): void {
 function setupGracefulShutdown(app: FastifyInstance): void {
   closeWithGrace(
     { delay: TIMEOUTS.SHUTDOWN_MS },
-    async ({ signal, err }: { signal: string; err?: Error }) => {
+    async (options) => {
+      const { signal, err } = options;
       if (err) {
         logger.error({ err }, 'Error triggered shutdown');
       }
@@ -412,7 +412,7 @@ export async function start(): Promise<void> {
     logger.info('🚀 Starting Consonant Control Plane...');
     const app = await buildApp();
 
-    grpcServer = await startGrpcServer(env.GRPC_PORT);
+    grpcServer = await startGrpcServer(env.GRPC_PORT, env.REDIS_URL);
     logger.info(`✓ gRPC server listening on ${env.GRPC_HOST}:${env.GRPC_PORT}`);
 
     await app.listen({

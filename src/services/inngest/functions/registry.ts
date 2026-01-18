@@ -31,6 +31,7 @@ import {
 } from './execution-workflow.js';
 
 import { registrationWorkflow } from './registration-workflow.js';
+import { bulkRegistrationWorkflow } from './bulk-registration-workflow.js';
 
 /**
  * Array of all Inngest functions.
@@ -61,6 +62,7 @@ export const allFunctions = [
   executionWorkflow,
   executionFailureHandler,
   registrationWorkflow,
+  bulkRegistrationWorkflow,
 ];
 
 /**

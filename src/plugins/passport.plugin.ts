@@ -1,5 +1,8 @@
 import fp from 'fastify-plugin';
-import passport from '@fastify/passport';
+import { Authenticator } from '@fastify/passport';
+const passport = new Authenticator();
+export { passport };
+
 import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt';
 import { HeaderAPIKeyStrategy } from 'passport-headerapikey';
 import { env } from '../config/env.js';
@@ -78,7 +81,7 @@ export default fp(async (fastify) => {
                 return done(null, false);
             } catch (err) {
                 logger.error({ err }, 'Passport API Key verification failed');
-                return done(err);
+                return done(err as Error);
             }
         }
     ));

@@ -73,7 +73,7 @@ export function initializeOpenTelemetry(): NodeSDK | null {
         maxQueueSize: OTEL.BATCH_MAX_QUEUE_SIZE,
         maxExportBatchSize: OTEL.BATCH_MAX_EXPORT_SIZE,
         scheduledDelayMillis: OTEL.BATCH_TIMEOUT_MS,
-      }),
+      }) as any,
 
       // Automatic instrumentation
       instrumentations: [

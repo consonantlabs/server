@@ -90,11 +90,12 @@ export class WorkQueueService {
      * ```
      */
     async enqueue(
+        organizationId: string,
         clusterId: string,
         work: WorkItem,
         priority: Priority = 'normal'
     ): Promise<void> {
-        const queueKey = this.getQueueKey(clusterId, priority);
+        const queueKey = this.getQueueKey(clusterId, organizationId, priority);
         const workJson = JSON.stringify(work);
 
         try {
@@ -102,14 +103,16 @@ export class WorkQueueService {
             await this.redis.rpush(queueKey, workJson);
 
             logger.info({
+                organizationId,
                 clusterId,
                 executionId: work.executionId,
                 priority,
-                queueLength: await this.getQueueLength(clusterId, priority),
+                queueLength: await this.getQueueLength(organizationId, clusterId, priority),
             }, 'Work item queued');
         } catch (error) {
             logger.error({
                 error,
+                organizationId,
                 clusterId,
                 executionId: work.executionId,
             }, 'Failed to enqueue work item');
@@ -141,14 +144,15 @@ export class WorkQueueService {
      * ```
      */
     async dequeue(
+        organizationId: string,
         clusterId: string,
         timeoutSeconds: number = 30
     ): Promise<WorkItem | null> {
         // Build list of queues to check in priority order
         const queues = [
-            this.getQueueKey(clusterId, 'high'),
-            this.getQueueKey(clusterId, 'normal'),
-            this.getQueueKey(clusterId, 'low'),
+            this.getQueueKey(clusterId, organizationId, 'high'),
+            this.getQueueKey(clusterId, organizationId, 'normal'),
+            this.getQueueKey(clusterId, organizationId, 'low'),
         ];
 
         try {
@@ -165,6 +169,7 @@ export class WorkQueueService {
             const work = JSON.parse(workJson) as WorkItem;
 
             logger.info({
+                organizationId,
                 clusterId,
                 executionId: work.executionId,
                 queueKey,
@@ -174,6 +179,7 @@ export class WorkQueueService {
         } catch (error) {
             logger.error({
                 error,
+                organizationId,
                 clusterId,
             }, 'Failed to dequeue work item');
             throw new Error(`Failed to dequeue work: ${error}`);
@@ -191,10 +197,11 @@ export class WorkQueueService {
      * @returns Next work item or null if queue is empty
      */
     async peek(
+        organizationId: string,
         clusterId: string,
         priority: Priority = 'normal'
     ): Promise<WorkItem | null> {
-        const queueKey = this.getQueueKey(clusterId, priority);
+        const queueKey = this.getQueueKey(clusterId, organizationId, priority);
 
         try {
             // LINDEX 0 gets the leftmost (next) item without removing it
@@ -208,6 +215,7 @@ export class WorkQueueService {
         } catch (error) {
             logger.error({
                 error,
+                organizationId,
                 clusterId,
                 priority,
             }, 'Failed to peek at queue');
@@ -226,24 +234,26 @@ export class WorkQueueService {
      * @returns Number of items in queue
      */
     async getQueueLength(
+        organizationId: string,
         clusterId: string,
         priority?: Priority
     ): Promise<number> {
         try {
             if (priority) {
                 // Get length of specific priority queue
-                const queueKey = this.getQueueKey(clusterId, priority);
+                const queueKey = this.getQueueKey(clusterId, organizationId, priority);
                 return await this.redis.llen(queueKey);
             } else {
                 // Get total across all priorities
-                const high = await this.redis.llen(this.getQueueKey(clusterId, 'high'));
-                const normal = await this.redis.llen(this.getQueueKey(clusterId, 'normal'));
-                const low = await this.redis.llen(this.getQueueKey(clusterId, 'low'));
+                const high = await this.redis.llen(this.getQueueKey(clusterId, organizationId, 'high'));
+                const normal = await this.redis.llen(this.getQueueKey(clusterId, organizationId, 'normal'));
+                const low = await this.redis.llen(this.getQueueKey(clusterId, organizationId, 'low'));
                 return high + normal + low;
             }
         } catch (error) {
             logger.error({
                 error,
+                organizationId,
                 clusterId,
                 priority,
             }, 'Failed to get queue length');
@@ -260,11 +270,11 @@ export class WorkQueueService {
      * @param clusterId - Which cluster's queues to clear
      * @returns Array of work items that were cleared
      */
-    async clearClusterQueue(clusterId: string): Promise<WorkItem[]> {
+    async clearClusterQueue(organizationId: string, clusterId: string): Promise<WorkItem[]> {
         const cleared: WorkItem[] = [];
 
         for (const priority of ['high', 'normal', 'low'] as Priority[]) {
-            const queueKey = this.getQueueKey(clusterId, priority);
+            const queueKey = this.getQueueKey(clusterId, organizationId, priority);
 
             try {
                 // Get all items from the queue
@@ -278,6 +288,7 @@ export class WorkQueueService {
                 await this.redis.del(queueKey);
 
                 logger.info({
+                    organizationId,
                     clusterId,
                     priority,
                     count: workItems.length,
@@ -285,6 +296,7 @@ export class WorkQueueService {
             } catch (error) {
                 logger.error({
                     error,
+                    organizationId,
                     clusterId,
                     priority,
                 }, 'Failed to clear cluster queue');
@@ -297,10 +309,9 @@ export class WorkQueueService {
     /**
      * Get statistics about all queues in the system.
      * 
-     * Returns a summary of queue depths across all clusters.
-     * Useful for monitoring and alerting on queue buildup.
+     * Scans Redis for all queue keys and aggregates totals.
      * 
-     * @returns Map of cluster ID to queue statistics
+     * @returns Map of "org:cluster" to queue statistics
      */
     async getGlobalStats(): Promise<Map<string, {
         high: number;
@@ -311,26 +322,29 @@ export class WorkQueueService {
         const stats = new Map();
 
         try {
-            // Find all cluster queue keys
-            const pattern = 'cluster:*:work*';
+            // Find all cluster queue keys across all orgs
+            // Pattern: org:*:cluster:*:work*
+            const pattern = 'org:*:cluster:*:work*';
             const keys = await this.redis.keys(pattern);
 
-            // Extract unique cluster IDs
-            const clusterIds = new Set<string>();
+            // Extract unique org:cluster pairs
+            const targets = new Set<string>();
             for (const key of keys) {
-                const match = key.match(/^cluster:([^:]+):work/);
+                // Key format: org:{orgId}:cluster:{clusterId}:work...
+                const match = key.match(/^org:([^:]+):cluster:([^:]+):work/);
                 if (match) {
-                    clusterIds.add(match[1]);
+                    targets.add(`${match[1]}:${match[2]}`);
                 }
             }
 
-            // Get stats for each cluster
-            for (const clusterId of clusterIds) {
-                const high = await this.getQueueLength(clusterId, 'high');
-                const normal = await this.getQueueLength(clusterId, 'normal');
-                const low = await this.getQueueLength(clusterId, 'low');
+            // Get stats for each target
+            for (const target of targets) {
+                const [orgId, clusterId] = target.split(':');
+                const high = await this.getQueueLength(orgId, clusterId, 'high');
+                const normal = await this.getQueueLength(orgId, clusterId, 'normal');
+                const low = await this.getQueueLength(orgId, clusterId, 'low');
 
-                stats.set(clusterId, {
+                stats.set(target, {
                     high,
                     normal,
                     low,
@@ -347,15 +361,15 @@ export class WorkQueueService {
     /**
      * Build the Redis key for a cluster's queue.
      * 
-     * Queue keys follow the pattern: cluster:{clusterId}:work:{priority}
-     * Priority is omitted for normal priority to keep keys shorter.
+     * Pattern: org:{orgId}:cluster:{clusterId}:work[:{priority}]
      * 
      * @param clusterId - Cluster identifier
+     * @param organizationId - Organization identifier
      * @param priority - Priority level
      * @returns Redis key string
      */
-    private getQueueKey(clusterId: string, priority: Priority): string {
-        const base = `cluster:${clusterId}:work`;
+    private getQueueKey(clusterId: string, organizationId: string, priority: Priority): string {
+        const base = `org:${organizationId}:cluster:${clusterId}:work`;
         return priority === 'normal' ? base : `${base}:${priority}`;
     }
 }

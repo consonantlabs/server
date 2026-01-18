@@ -52,8 +52,23 @@ export function generateSecureToken(length: number = SECURITY.MIN_API_KEY_LENGTH
       `Token length must be at least ${SECURITY.MIN_API_KEY_LENGTH} bytes for security`
     );
   }
-  
+
   return crypto.randomBytes(length).toString('hex');
+}
+
+/**
+ * Generate a new API key and its hash.
+ * 
+ * Returns both the plaintext key (to show once to the user)
+ * and the hash (to store in the database).
+ * 
+ * @returns Object containing apiKey and keyHash
+ */
+export async function generateApiKey(): Promise<{ apiKey: string; keyHash: string }> {
+  // sk_ prefix for identification, followed by 64 chars of entropy
+  const apiKey = 'sk_' + generateSecureToken(32);
+  const keyHash = await hashSecret(apiKey);
+  return { apiKey, keyHash };
 }
 
 /**
@@ -151,7 +166,7 @@ export async function hashSecret(
       `Secret must be at least ${SECURITY.MIN_CLUSTER_SECRET_LENGTH} characters`
     );
   }
-  
+
   return await bcrypt.hash(secret, rounds);
 }
 
@@ -358,14 +373,14 @@ export function isValidHash(hash: string): boolean {
 export function timingSafeEqual(a: string, b: string): boolean {
   const aBuf = Buffer.from(a);
   const bBuf = Buffer.from(b);
-  
+
   if (aBuf.length !== bBuf.length) {
     // Perform dummy comparison to keep timing relatively consistent
     // This prevents attackers from learning string length via timing
     crypto.timingSafeEqual(aBuf, aBuf);
     return false;
   }
-  
+
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
@@ -406,13 +421,13 @@ export interface SecretValidationResult {
  */
 export function validateSecretFormat(secret: string): SecretValidationResult {
   const errors: string[] = [];
-  
+
   if (secret.length < SECURITY.MIN_CLUSTER_SECRET_LENGTH) {
     errors.push(
       `Secret must be at least ${SECURITY.MIN_CLUSTER_SECRET_LENGTH} characters`
     );
   }
-  
+
   // Check for weak patterns
   const weakPatterns = [
     'password',
@@ -423,20 +438,20 @@ export function validateSecretFormat(secret: string): SecretValidationResult {
     'letmein',
     'welcome',
   ];
-  
+
   const lowerSecret = secret.toLowerCase();
   for (const pattern of weakPatterns) {
     if (lowerSecret.includes(pattern)) {
       errors.push(`Secret contains weak pattern: ${pattern}`);
     }
   }
-  
+
   // Ensure sufficient entropy (rough check)
   const uniqueChars = new Set(secret).size;
   if (uniqueChars < 16) {
     errors.push('Secret has insufficient entropy (too few unique characters)');
   }
-  
+
   return {
     valid: errors.length === 0,
     errors,
@@ -481,7 +496,7 @@ export function randomElement<T>(array: T[]): T {
   if (array.length === 0) {
     throw new Error('Cannot select from empty array');
   }
-  
+
   const index = randomInt(0, array.length - 1);
   return array[index];
 }
@@ -508,11 +523,11 @@ export function redactSecret(secret: string | undefined | null): string {
   if (!secret) {
     return '[empty]';
   }
-  
+
   if (secret.length <= 8) {
     return '***';
   }
-  
+
   return secret.substring(0, 8) + '...';
 }
 
@@ -551,10 +566,10 @@ export function maskEnvVar(key: string, value: string): string {
     'AUTH',
     'PRIVATE',
   ];
-  
+
   const upperKey = key.toUpperCase();
   const isSensitive = sensitivePatterns.some(pattern => upperKey.includes(pattern));
-  
+
   return isSensitive ? '***MASKED***' : value;
 }
 

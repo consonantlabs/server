@@ -118,6 +118,66 @@ export class ApiKeyService {
             throw new Error(`Failed to delete API key: ${error}`);
         }
     }
+    /**
+     * Rotate an API key.
+     * 
+     * Creates a new key, copies settings, revokes the old one,
+     * and returns the new plaintext key.
+     */
+    async rotateApiKey(organizationId: string, oldKeyId: string): Promise<{ apiKey: string; record: ApiKey }> {
+        try {
+            const oldKey = await this.prisma.apiKey.findUnique({
+                where: { id: oldKeyId, organizationId }
+            });
+
+            if (!oldKey) throw new Error('Old API key not found');
+
+            // 1. Create new key
+            const { apiKey, record } = await this.createApiKey({
+                organizationId,
+                name: `${oldKey.name} (Rotated)`,
+                expiresAt: oldKey.expiresAt ?? undefined,
+                rateLimit: oldKey.rateLimit,
+            });
+
+            // 2. Revoke old key
+            await this.revokeApiKey(organizationId, oldKeyId);
+
+            // 3. Update all clusters linked to this key
+            await this.prisma.cluster.updateMany({
+                where: { apiKeyId: oldKeyId },
+                data: { apiKeyId: record.id }
+            });
+
+            // 4. Notify connected clusters to refresh config
+            const clusters = await this.prisma.cluster.findMany({
+                where: { apiKeyId: record.id },
+                select: { id: true }
+            });
+
+            const { getConnectionManager } = await import('./grpc/connection-manager.js');
+            const manager = getConnectionManager();
+
+            for (const cluster of clusters) {
+                // sendToCluster will propagate via Redis PubSub if not connected to this pod
+                await manager.sendToCluster(cluster.id, {
+                    config_update: {
+                        cluster_id: cluster.id,
+                        config_json: JSON.stringify({
+                            api_key: apiKey, // Relayer will use this on next connect
+                            rotated_at: new Date().toISOString()
+                        })
+                    }
+                });
+            }
+
+            logger.info({ organizationId, oldKeyId, newKeyId: record.id }, 'API key rotated and clusters notified');
+            return { apiKey, record };
+        } catch (error) {
+            logger.error({ error, organizationId, oldKeyId }, 'Failed to rotate API key');
+            throw error;
+        }
+    }
 }
 
 let apiKeyServiceInstance: ApiKeyService | null = null;

@@ -203,7 +203,7 @@ export class ClusterService {
 
       // Factor 1: Queue depth (heavily weighted)
       // Prefer clusters with shorter queues
-      const queueLength = await workQueue.getQueueLength(cluster.id);
+      const queueLength = await workQueue.getQueueLength(cluster.organizationId, cluster.id);
       const queuePenalty = Math.min(queueLength * 5, 50); // Cap at 50 points
       score -= queuePenalty;
 
@@ -257,7 +257,13 @@ export class ClusterService {
    * @param apiKeyId - Which customer's clusters to check
    * @returns Array of cluster stats
    */
-  async getClusterStats(apiKeyId: string): Promise<Array<{
+  /**
+   * Get statistics about cluster availability and load.
+   * 
+   * @param organizationId - Which organization's clusters to check
+   * @returns Array of cluster stats including queue depth and last heartbeat
+   */
+  async getClusterStats(organizationId: string): Promise<Array<{
     id: string;
     name: string;
     status: string;
@@ -266,14 +272,14 @@ export class ClusterService {
     capabilities: ClusterCapabilities;
   }>> {
     const clusters = await this.prisma.cluster.findMany({
-      where: { organizationId: apiKeyId },
+      where: { organizationId },
     });
 
     const workQueue = getWorkQueue();
     const stats = [];
 
     for (const cluster of clusters) {
-      const queueDepth = await workQueue.getQueueLength(cluster.id);
+      const queueDepth = await workQueue.getQueueLength(cluster.organizationId, cluster.id);
 
       stats.push({
         id: cluster.id,
@@ -286,6 +292,97 @@ export class ClusterService {
     }
 
     return stats;
+  }
+  /**
+   * Register or update a cluster.
+   * Uses an upsert operation to handle both initial registration and subsequent metadata updates.
+   * 
+   * @param data - Cluster registration details
+   * @returns The registered cluster record
+   */
+  async registerCluster(data: {
+    organizationId: string;
+    apiKeyId: string;
+    name: string;
+    relayerVersion?: string;
+    capabilities?: any;
+    secretHash: string;
+  }): Promise<Cluster> {
+    return this.prisma.cluster.upsert({
+      where: {
+        organizationId_name: {
+          organizationId: data.organizationId,
+          name: data.name,
+        }
+      },
+      update: {
+        lastHeartbeat: new Date(),
+        relayerVersion: data.relayerVersion,
+        capabilities: data.capabilities ?? {},
+        status: 'ACTIVE',
+        apiKeyId: data.apiKeyId,
+        secretHash: data.secretHash,
+      },
+      create: {
+        organizationId: data.organizationId,
+        name: data.name,
+        relayerVersion: data.relayerVersion,
+        capabilities: data.capabilities ?? {},
+        secretHash: data.secretHash,
+        status: 'ACTIVE',
+        apiKeyId: data.apiKeyId,
+      },
+    });
+  }
+
+  /**
+   * Delete a cluster and close its active stream fleet-wide.
+   * 
+   * This is a "brutal" cleanup operation that:
+   * 1. Signals all control plane pods to terminate the gRPC stream.
+   * 2. Purges all pending work from the Redis queue.
+   * 3. Removes the cluster record from the database.
+   * 
+   * @param organizationId - Owning organization
+   * @param clusterId - Cluster to delete
+   */
+  async deleteCluster(organizationId: string, clusterId: string): Promise<void> {
+    try {
+      // 1. Close active gRPC stream fleet-wide (via Redis signaling)
+      const { getConnectionManager } = await import('./grpc/connection-manager.js');
+      const manager = getConnectionManager();
+      await manager.unregisterStream(clusterId);
+
+      // 2. Clear work queue (multi-tenant partitioned)
+      const { getWorkQueue } = await import('./redis/queue.js');
+      await getWorkQueue().clearClusterQueue(organizationId, clusterId);
+
+      // 3. Delete from DB
+      await this.prisma.cluster.delete({
+        where: { id: clusterId, organizationId }
+      });
+
+      logger.info({ organizationId, clusterId }, 'Cluster deleted and connection closed');
+    } catch (error) {
+      logger.error({ error, organizationId, clusterId }, 'Failed to delete cluster');
+      throw error;
+    }
+  }
+
+  /**
+   * Update cluster heartbeat and status.
+   * 
+   * @param clusterId - Cluster to update
+   * @param statusText - New status string (defaults to ACTIVE)
+   */
+  async updateHeartbeat(clusterId: string, statusText: string = 'ACTIVE'): Promise<void> {
+    await this.prisma.cluster.update({
+      where: { id: clusterId },
+      data: {
+        lastHeartbeat: new Date(),
+        status: statusText as any
+      }
+    });
   }
 }
 

@@ -278,11 +278,14 @@ model Execution {
   error     String?  // Error message if failed
   
   // Timing (critical for SLAs and billing)
-  createdAt    DateTime  @default(now()) // When SDK called execute()
   queuedAt     DateTime? // When queued to cluster
   startedAt    DateTime? // When agent actually started running
   completedAt  DateTime? // When execution finished
+  lastStatusUpdate DateTime? // When the last status event was received
   durationMs   Int?      // Total execution time in milliseconds
+  
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
   
   // Resource usage for billing (stored as JSON)
   // Example: {cpuSeconds: 120, memoryMbSeconds: 48000, gpuSeconds: 60}

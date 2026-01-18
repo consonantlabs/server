@@ -11,7 +11,7 @@
 
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getAgentRegistry } from '../services/agent.service.js';
+import { getAgentService } from '../services/agent.service.js';
 import { inngest } from '../services/inngest/client.js';
 import { logger } from '../utils/logger.js';
 import { prismaManager } from '../services/db/manager.js';
@@ -116,6 +116,64 @@ export async function registerApiRoutes(fastify: FastifyInstance) {
     });
 
     // =========================================================================
+    // POST /api/agents/bulk-register - Register Multiple Agents (ASYNC)
+    // =========================================================================
+    fastify.post<{
+        Body: { agents: z.infer<typeof AgentRegistrationSchema>[] };
+    }>('/api/agents/bulk-register', async (request, reply) => {
+        const organizationId = (request as any).organizationId;
+        const { agents } = request.body;
+
+        if (!organizationId) {
+            return reply.code(401).send({
+                error: 'Unauthorized',
+                message: 'Valid API key required',
+            });
+        }
+
+        if (!Array.isArray(agents) || agents.length === 0) {
+            return reply.code(400).send({
+                error: 'Bad Request',
+                message: 'A non-empty list of agents is required',
+            });
+        }
+
+        try {
+            const requestId = crypto.randomUUID();
+
+            // Trigger Async Bulk Registration Workflow
+            await inngest.send({
+                name: 'agent.bulk_registration.requested',
+                data: {
+                    organizationId,
+                    configs: agents,
+                    requestId,
+                    requestedAt: new Date().toISOString(),
+                },
+            });
+
+            logger.info({
+                organizationId,
+                count: agents.length,
+                requestId,
+            }, 'Bulk agent registration queued (Async)');
+
+            return reply.code(202).send({
+                accepted: true,
+                message: `Bulk registration for ${agents.length} agents queued`,
+                requestId,
+            });
+        } catch (error: any) {
+            logger.error({ error, count: agents.length }, 'Failed to queue bulk registration');
+
+            return reply.code(500).send({
+                error: 'Internal server error',
+                message: 'Failed to queue bulk registration',
+            });
+        }
+    });
+
+    // =========================================================================
     // GET /api/agents - List/Find Agents
     // =========================================================================
     fastify.get<{
@@ -129,14 +187,14 @@ export async function registerApiRoutes(fastify: FastifyInstance) {
         }
 
         try {
-            const agentRegistry = getAgentRegistry();
+            const agentService = getAgentService();
 
             if (name) {
-                const agent = await agentRegistry.get(organizationId, name);
+                const agent = await agentService.get(organizationId, name);
                 return { agents: agent ? [agent] : [] };
             }
 
-            const agents = await agentRegistry.list(organizationId);
+            const agents = await agentService.list(organizationId);
             return { agents };
         } catch (error) {
             logger.error({ error, organizationId }, 'Failed to list agents');
@@ -168,8 +226,8 @@ export async function registerApiRoutes(fastify: FastifyInstance) {
 
         try {
             // 1. Verify Agent Exists (fast lookup)
-            const agentRegistry = getAgentRegistry();
-            const agent = await agentRegistry.get(organizationId, agentName);
+            const agentService = getAgentService();
+            const agent = await agentService.get(organizationId, agentName);
 
             if (!agent) {
                 return reply.code(404).send({

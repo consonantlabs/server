@@ -60,9 +60,11 @@ const envSchema = z.object({
    * This should be a separate PostgreSQL database with TimescaleDB extension.
    * Allows independent scaling and retention policies from operational data.
    * 
+   * If not provided, the application will fall back to using DATABASE_URL.
+   * 
    * Example: postgresql://user:pass@localhost:5432/consonant_timeseries
    */
-  TIMESCALE_DB_URL: z.string().min(1),
+  TIMESCALE_DB_URL: z.string().optional(),
 
   /**
    * JWT secret for signing authentication tokens.

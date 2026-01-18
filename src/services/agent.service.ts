@@ -167,6 +167,29 @@ export class AgentService {
   }
 
   /**
+   * Register or update a list of agents.
+   * 
+   * Useful for bulk onboarding or syncing agent catalogs from CI/CD.
+   * 
+   * @param organizationId - Which organization owns these agents
+   * @param configs - Array of agent configurations
+   * @returns Array of registration results
+   */
+  async bulkRegisterOrUpdate(
+    organizationId: string,
+    configs: AgentConfig[]
+  ): Promise<Array<{ agent: Agent; action: 'created' | 'updated' | 'unchanged' }>> {
+    const results = [];
+    
+    for (const config of configs) {
+      const result = await this.registerOrUpdate(organizationId, config);
+      results.push(result);
+    }
+    
+    return results;
+  }
+
+  /**
    * Update agent status.
    * Called when relayer acknowledges registration or reports failure.
    * 

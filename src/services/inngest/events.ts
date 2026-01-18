@@ -170,6 +170,34 @@ export type ConsonantEvents = {
     };
   };
 
+  /**
+   * Triggered when API receives a bulk registration request.
+   */
+  'agent.bulk_registration.requested': {
+    data: {
+      organizationId: string;
+      configs: AgentConfig[];
+      requestId: string;
+      requestedAt: string;
+    };
+  };
+
+  /**
+   * Triggered when bulk registration completes.
+   */
+  'agent.bulk_registration.completed': {
+    data: {
+      organizationId: string;
+      results: Array<{
+        name: string;
+        agentId?: string;
+        status: 'success' | 'failed';
+        error?: string;
+      }>;
+      completedAt: string;
+    };
+  };
+
   // =========================================================================
   // EXECUTION FLOW EVENTS
   // =========================================================================

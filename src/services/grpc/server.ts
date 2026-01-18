@@ -16,17 +16,18 @@ import { fileURLToPath } from 'url';
 import { logger } from '../../utils/logger.js';
 import { prismaManager } from '../db/manager.js';
 import { getWorkQueue } from '../redis/queue.js';
-import { inngest } from '../inngest/client.js';
-import { verifySecret } from '../../utils/crypto.js';
+import { generateSecureToken, hashSecret, verifySecret } from '../../utils/crypto.js';
+import { getConnectionManager } from './connection-manager.js';
+import { getEventHandler } from './handlers/event-handler.js';
+import { getClusterService } from '../cluster.selection.js';
+import { authInterceptor } from './interceptors/auth-interceptor.js';
+import { loggingInterceptor } from './interceptors/logging-interceptor.js';
+import { errorInterceptor } from './interceptors/error-interceptor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/**
- * Active stream tracking.
- * Maps cluster ID to the active bidirectional stream for that cluster.
- */
-const activeStreams = new Map<string, grpc.ServerDuplexStream<any, any>>();
+// Connection management is now handled by ConnectionManager singleton
 
 /**
  * Load and compile the Protocol Buffer definitions.
@@ -48,12 +49,26 @@ function loadProtoDefinition() {
 
 /**
  * Register a Kubernetes cluster.
+ * 
+ * Protected by API Key (via AuthInterceptor and internal validation).
  */
 async function registerCluster(
   call: grpc.ServerUnaryCall<any, any>,
   callback: grpc.sendUnaryData<any>
 ) {
-  const { api_key, cluster_id, cluster_name, relayer_version, capabilities } = call.request;
+  // Extract credentials - try metadata first (normalized), then payload
+  const metadataApiKey = call.metadata.get('x-api-key')[0] as string | undefined;
+  const { api_key: payloadApiKey, cluster_id, cluster_name, relayer_version, capabilities } = call.request;
+
+  const apiKey = metadataApiKey || payloadApiKey;
+  const clusterService = getClusterService();
+
+  if (!apiKey) {
+    return callback({
+      code: grpc.status.UNAUTHENTICATED,
+      details: 'API Key missing in metadata or payload',
+    });
+  }
 
   logger.info({
     clusterId: cluster_id,
@@ -63,90 +78,7 @@ async function registerCluster(
 
   try {
     const prisma = await prismaManager.getClient();
-    // 1. Authenticate API key
-    const keyPrefix = api_key.substring(0, 8);
-    const apiKeys = await prisma.apiKey.findMany({
-      where: { keyPrefix, revokedAt: null }
-    });
-
-    let validKey = null;
-    for (const key of apiKeys) {
-      if (await verifySecret(api_key, key.keyHash)) {
-        validKey = key;
-        break;
-      }
-    }
-
-    if (!validKey) {
-      return callback({
-        code: grpc.status.UNAUTHENTICATED,
-        details: 'Invalid API key',
-      });
-    }
-
-    // 2. Register/Update Cluster
-    const cluster = await prisma.cluster.upsert({
-      where: {
-        organizationId_name: {
-          organizationId: validKey.organizationId,
-          name: cluster_name,
-        }
-      },
-      update: {
-        lastHeartbeat: new Date(),
-        relayerVersion: relayer_version,
-        capabilities: capabilities ? JSON.parse(JSON.stringify(capabilities)) : {},
-        status: 'ACTIVE',
-        apiKeyId: validKey.id, // Link to API Key
-      },
-      create: {
-        organizationId: validKey.organizationId,
-        name: cluster_name,
-        relayerVersion: relayer_version,
-        capabilities: capabilities ? JSON.parse(JSON.stringify(capabilities)) : {},
-        secretHash: await import('../../utils/crypto.js').then(m => m.hashSecret(cluster_id)), // Initial secret is cluster_id
-        status: 'ACTIVE',
-        apiKeyId: validKey.id, // Link to API Key
-      },
-    });
-
-    // TODO: In production, we should return the generated secret to the relayer here
-    // But currently the proto definition might not support it, or we expect it pre-shared.
-    // For now, we satisfy the DB requirement.
-
-    logger.info({ clusterId: cluster.id }, 'Cluster registered successfully');
-
-    callback(null, {
-      success: true,
-      cluster_id: cluster.id,
-      message: 'Registration successful',
-      config_json: JSON.stringify({
-        heartbeat_interval_ms: 30000,
-        log_level: 'info'
-      }),
-    });
-  } catch (error) {
-    logger.error({ error, clusterId: cluster_id }, 'Registration failed');
-    callback({
-      code: grpc.status.INTERNAL,
-      details: 'Registration failed',
-    });
-  }
-}
-
-/**
- * Handle bidirectional stream for work and status.
- */
-async function streamWork(call: grpc.ServerDuplexStream<any, any>) {
-  // Extract metadata (auth)
-  const metadata = call.metadata;
-  const apiKey = metadata.get('x-api-key')[0] as string;
-  const clusterId = metadata.get('x-cluster-id')[0] as string;
-  const workQueue = getWorkQueue();
-
-  // 1. Verify API Key and Cluster Ownership
-  try {
-    const prisma = await prismaManager.getClient();
+    // 1. Authenticate API key (Brutal re-verification for high security)
     const keyPrefix = apiKey.substring(0, 8);
     const apiKeys = await prisma.apiKey.findMany({
       where: { keyPrefix, revokedAt: null }
@@ -161,156 +93,181 @@ async function streamWork(call: grpc.ServerDuplexStream<any, any>) {
     }
 
     if (!validKey) {
-      logger.warn({ clusterId }, 'Stream rejected: Invalid API key');
-      call.end();
-      return;
+      return callback({
+        code: grpc.status.UNAUTHENTICATED,
+        details: 'Invalid API key',
+      });
     }
 
-    // Ensure cluster belongs to the API key's organization
-    const cluster = await prisma.cluster.findFirst({
-      where: { id: clusterId, organizationId: validKey.organizationId }
+    // 2. Generate secure cluster token (Used if we want multi-layer auth, 
+    // but per user request we primarily rely on API Key now. 
+    // We still store this for legacy compatibility or future use)
+    const clusterToken = generateSecureToken(32);
+    const secretHash = await hashSecret(clusterToken);
+
+    // 3. Register/Update Cluster via Service
+    const cluster = await clusterService.registerCluster({
+      organizationId: validKey.organizationId,
+      apiKeyId: validKey.id,
+      name: cluster_name,
+      relayerVersion: relayer_version,
+      capabilities: capabilities ? JSON.parse(JSON.stringify(capabilities)) : {},
+      secretHash: secretHash,
     });
 
-    if (!cluster) {
-      logger.warn({ clusterId, orgId: validKey.organizationId }, 'Stream rejected: Cluster not found or access denied');
-      call.end();
-      return;
-    }
+    logger.info({ clusterId: cluster.id }, 'Cluster registered successfully');
 
-    logger.info({ clusterId, orgId: validKey.organizationId }, 'Relayer connected via stream');
-
-    // Update status to ACTIVE
-    await prisma.cluster.update({
-      where: { id: clusterId },
-      data: { status: 'ACTIVE', lastHeartbeat: new Date() }
+    callback(null, {
+      success: true,
+      cluster_id: cluster.id,
+      message: 'Registration successful',
+      config_json: JSON.stringify({
+        heartbeat_interval_ms: 30000,
+        log_level: 'info',
+        cluster_token: clusterToken // Provided in case the relayer wants to use it
+      }),
     });
+  } catch (error) {
+    logger.error({ error, clusterId: cluster_id }, 'Registration failed');
+    callback({
+      code: grpc.status.INTERNAL,
+      details: 'Registration failed',
+    });
+  }
+}
 
+/**
+ * Handle bidirectional stream for work and status.
+ */
+/**
+ * Handle bidirectional stream for work and telemetry (Primary Relayer Loop).
+ * 
+ * This is the "hot pipe" where:
+ * 1. Control Plane pushes work items to Relayer
+ * 2. Relayer pushes logs, metrics, and status back to Control Plane
+ * 3. Heartbeats maintain connection liveness
+ * 
+ * @param call - The bidirectional gRPC stream
+ */
+async function streamWork(call: grpc.ServerDuplexStream<any, any>) {
+  const clusterId = call.metadata.get('cluster-id')[0] as string;
+  const connectionManager = getConnectionManager();
+  const workQueue = getWorkQueue();
+
+  // Stream is already authenticated by AuthInterceptor
+  logger.info({ clusterId }, 'Relayer stream established');
+
+  // Register stream with manager
+  await connectionManager.registerStream(clusterId, call);
+
+  // Update status to ACTIVE
+  try {
+    await getClusterService().updateHeartbeat(clusterId, 'ACTIVE');
   } catch (err) {
-    logger.error({ err, clusterId }, 'Stream authentication error');
-    call.end();
-    return;
+    logger.error({ err, clusterId }, 'Failed to update cluster status on connect');
   }
 
-  // Register stream
-  activeStreams.set(clusterId, call);
+  // 1. Fetch cluster to get organizationId
+  let organizationId = 'unknown';
+  try {
+    const prisma = await prismaManager.getClient();
+    const cluster = await prisma.cluster.findUnique({
+      where: { id: clusterId },
+      select: { organizationId: true }
+    });
+    if (cluster) {
+      organizationId = cluster.organizationId;
+    }
+  } catch (err) {
+    logger.error({ err, clusterId }, 'Failed to fetch cluster organization for work pusher');
+  }
 
-  // Handle incoming messages (Status updates, Logs)
+  // Handle incoming messages
   call.on('data', async (message: any) => {
     try {
       if (message.heartbeat) {
-        // Update heartbeat
-        // We could optimize this to not hit DB every time
-        const prisma = await prismaManager.getClient();
-        await prisma.cluster.updateMany({
-          where: { id: clusterId },
-          data: { lastHeartbeat: new Date(message.heartbeat.timestamp) }
-        });
+        // Emit for real-time tracking
+        await connectionManager.handleHeartbeat(clusterId);
 
-        // Trigger Inngest heartbeat event
-        inngest.send({
-          name: 'cluster.heartbeat',
-          data: {
-            clusterId,
-            status: message.heartbeat.status,
-            heartbeatAt: new Date().toISOString()
-          }
+        // Background DB update via service
+        getClusterService().updateHeartbeat(clusterId).catch((e: Error) => {
+          logger.error({ e, clusterId }, 'Heartbeat DB update failed');
         });
       } else if (message.execution_status) {
-        // Forward to Inngest for processing
-        const status = message.execution_status;
-        const eventName = getStatusEventName(status.status);
-
-        if (eventName) {
-          await inngest.send({
-            name: eventName,
-            data: {
-              executionId: status.execution_id,
-              clusterId: status.cluster_id,
-              status: status.status,
-              ...status.started_details, // Spread details if any
-              ...status.completed_details,
-              ...status.failed_details
-            }
-          });
-        }
+        await getEventHandler().handleExecutionStatus(clusterId, message.execution_status);
+      } else if (message.log_batch) {
+        await getEventHandler().handleLogBatch(clusterId, message.log_batch);
+      } else if (message.metric_batch) {
+        await getEventHandler().handleMetricBatch(clusterId, message.metric_batch);
+      } else if (message.trace_batch) {
+        await getEventHandler().handleTraceBatch(clusterId, message.trace_batch);
       }
-      // Handle logs, metrics, traces...
     } catch (err) {
       logger.error({ err, clusterId }, 'Error processing stream message');
     }
   });
 
-  call.on('end', () => {
-    logger.info({ clusterId }, 'Relayer disconnected');
-    activeStreams.delete(clusterId);
+  call.on('end', async () => {
+    logger.info({ clusterId }, 'Relayer stream closed by client');
+    await connectionManager.unregisterStream(clusterId);
   });
 
-  call.on('error', (err) => {
-    logger.error({ err, clusterId }, 'Stream error');
-    activeStreams.delete(clusterId);
+  call.on('error', async (err) => {
+    logger.error({ err, clusterId }, 'Stream error (cleanup triggered)');
+    await connectionManager.unregisterStream(clusterId);
   });
 
-  // Start Work Pusher for this cluster
-  // We poll Redis queue specifically for this cluster
-  const pollInterval = setInterval(async () => {
-    // Stop if stream is closed
-    if (!activeStreams.has(clusterId)) {
-      clearInterval(pollInterval);
-      return;
-    }
+  // Work Pusher - Using a more efficient approach
+  // In Phase 2, we should move this to an event-driven listener on the ConnectionManager
+  // but for immediate stability we keep a clean loop here.
+  const pushWork = async () => {
+    if (!connectionManager.isConnected(clusterId)) return;
 
     try {
-      // Pop work from Redis (non-blocking or short timeout)
-      const workItem = await workQueue.dequeue(clusterId);
+      // Dequeue with partitioning
+      const workItem = await workQueue.dequeue(organizationId, clusterId, 5);
 
-      if (workItem) {
-        logger.info({
-          clusterId,
-          executionId: workItem.executionId
-        }, 'Pushing work to relayer');
-
-        // Write to gRPC stream
-        // Write to gRPC stream with full proto mapping
-        call.write({
+      if (workItem && connectionManager.isConnected(clusterId)) {
+        await connectionManager.sendToCluster(clusterId, {
           work_item: {
             execution_id: workItem.executionId,
             agent_id: workItem.agentId,
             agent_name: workItem.agentName,
             agent_image: workItem.agentImage,
             input_json: JSON.stringify(workItem.input),
-            resources: workItem.resources, // Proto match: cpu, memory, gpu, timeout
-            retry_policy: {
-              max_attempts: workItem.retryPolicy.maxAttempts,
-              backoff: workItem.retryPolicy.backoff,
-              initial_delay: workItem.retryPolicy.initialDelay || '1s'
-            },
+            resources: workItem.resources,
+            retry_policy: workItem.retryPolicy,
             use_agent_sandbox: workItem.useAgentSandbox,
             warm_pool_size: workItem.warmPoolSize,
             network_policy: workItem.networkPolicy,
             environment_variables_json: JSON.stringify(workItem.environmentVariables || {})
           }
         });
+
+        // Recurse to check for more work immediately
+        setImmediate(pushWork);
+      } else if (connectionManager.isConnected(clusterId)) {
+        // No work, wait a bit then check again
+        setTimeout(pushWork, 100);
       }
     } catch (err) {
-      logger.error({ err, clusterId }, 'Error polling/pushing work');
+      logger.error({ err, clusterId }, 'Work pusher error');
+      setTimeout(pushWork, 1000);
     }
-  }, 100); // Check every 100ms - high responsiveness
+  };
+
+  pushWork();
 }
 
-function getStatusEventName(statusEnum: any): any {
-  // Map proto enum to event name
-  switch (statusEnum) {
-    case 'STATUS_RUNNING': return 'agent.execution.started';
-    case 'STATUS_COMPLETED': return 'agent.execution.completed';
-    case 'STATUS_FAILED': return 'agent.execution.failed';
-    default: return null;
-  }
-}
+// Helper for mapping status enums is now in EventHandler
 
 /**
  * Start the gRPC server.
  */
-export async function startGrpcServer(port: number) {
+export async function startGrpcServer(port: number, redisUrl: string) {
+  const connectionManager = getConnectionManager();
+  await connectionManager.init(redisUrl);
+
   const proto = loadProtoDefinition();
   const server = new grpc.Server();
 
@@ -318,6 +275,13 @@ export async function startGrpcServer(port: number) {
     RegisterCluster: registerCluster,
     StreamWork: streamWork,
   });
+
+  // Register interceptors for all calls
+  (server as any).interceptors = [
+    authInterceptor,
+    loggingInterceptor,
+    errorInterceptor,
+  ];
 
   return new Promise<void>((resolve, reject) => {
     server.bindAsync(

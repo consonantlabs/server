@@ -26,6 +26,27 @@ import { getClusterService } from '../../cluster.selection.js';
 import { getWorkQueue } from '../../redis/queue.js';
 import type { WorkItem } from '../../redis/queue.js';
 
+interface SimpleAgentRecord {
+    id: string;
+    name: string;
+    image: string;
+    resources: {
+        cpu: string;
+        memory: string;
+        gpu?: string;
+        timeout: string;
+    };
+    retryPolicy: {
+        maxAttempts: number;
+        backoff: 'exponential' | 'linear' | 'constant';
+        initialDelay?: string;
+    };
+    useAgentSandbox: boolean;
+    warmPoolSize: number;
+    networkPolicy: string;
+    environmentVariables?: Record<string, string>;
+}
+
 /**
  * Main execution workflow function.
  * Triggered by 'agent.execution.requested' event from SDK.
@@ -98,7 +119,7 @@ export const executionWorkflow = inngest.createFunction(
         // =====================================================================
         // STEP 2: GET AGENT CONFIG
         // =====================================================================
-        const agent = await step.run('get-agent-config', async () => {
+        const agent = await step.run('get-agent-config', async (): Promise<SimpleAgentRecord> => {
             const agentService = getAgentService();
             const agentRecord = await agentService.get(organizationId, agentId);
             // We know it exists from Step 1, but type safety needs it
@@ -204,8 +225,9 @@ export const executionWorkflow = inngest.createFunction(
                 environmentVariables: agent.environmentVariables,
             };
 
-            // Queue to Redis for gRPC pickup
+            // Queue to Redis with partitioning
             await workQueue.enqueue(
+                organizationId,
                 selectedCluster.id,
                 workItem,
                 priority as any || 'normal'
@@ -311,32 +333,36 @@ export const executionFailureHandler = inngest.createFunction(
     { event: 'agent.execution.failed' },
     async ({ event, step }) => {
         const { executionId, error, attempt } = event.data;
-        const maxAttempts = 3; // Default max attempts or could fetch from DB
 
         logger.warn({
             executionId,
             error: error.message,
             attempt,
-            maxAttempts,
         }, 'Execution failed');
+
+        // Step 1: Fetch execution with agent for retry policy and maxAttempts
+        const execution = await step.run('get-execution-for-retry', async () => {
+            const prisma = await prismaManager.getClient();
+            return await prisma.execution.findUnique({
+                where: { id: executionId },
+                include: { agent: true },
+            });
+        });
+
+        if (!execution) {
+            logger.error({ executionId }, 'Execution not found for failure handling');
+            return { status: 'error', message: 'Execution not found' };
+        }
+
+        const maxAttempts = execution.maxAttempts || 3;
 
         // Check if we should retry
         if (attempt < maxAttempts) {
             await step.run('schedule-retry', async () => {
                 const prisma = await prismaManager.getClient();
 
-                // Get execution with agent for retry
-                const execution = await prisma.execution.findUnique({
-                    where: { id: executionId },
-                    include: { agent: true },
-                });
-
-                if (!execution) {
-                    throw new Error(`Execution ${executionId} not found`);
-                }
-
                 // Calculate backoff delay
-                const retryPolicy = execution.agent.retryPolicy as any;
+                const retryPolicy = (execution.agent as any).retryPolicy;
                 const delaySeconds = calculateBackoff(attempt, retryPolicy);
                 const nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
 

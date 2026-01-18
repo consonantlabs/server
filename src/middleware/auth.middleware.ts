@@ -6,7 +6,6 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import passport from '@fastify/passport';
 import { logger } from '../utils/logger.js';
 import { contextManager } from '../utils/context.js';
 
@@ -26,7 +25,7 @@ export async function authenticate(
 
   try {
     // Try API Key first (Fastest/SDK path)
-    const apiKeyAuth = await (request as any).passport.authenticate('api-key', { session: false })(request, reply);
+    await (request.server as any).passport.authenticate('api-key', { session: false })(request, reply);
     if (request.user) {
       const user = request.user as any;
       request.organizationId = user.organizationId;
@@ -36,7 +35,7 @@ export async function authenticate(
     }
 
     // Try JWT second (User/Dashboard path)
-    await (request as any).passport.authenticate('jwt', { session: false })(request, reply);
+    await (request.server as any).passport.authenticate('jwt', { session: false })(request, reply);
     if (request.user) {
       const user = request.user as any;
       request.userId = user.id;
