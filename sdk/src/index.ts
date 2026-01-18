@@ -3,38 +3,55 @@
  * @module @consonant/sdk
  * 
  * This is the official TypeScript SDK for the Consonant Agent Execution Platform.
- * It provides a clean, typed interface for registering agents and executing them.
+ * Built for performance, reliability, and ease of use in production environments.
  * 
- * DESIGN PHILOSOPHY:
- * The SDK is inspired by Inngest's excellent developer experience. It provides:
- * - Simple, intuitive API  
- * - Full TypeScript type safety
- * - Automatic retries and error handling
- * - Synchronous execution semantics (execute() returns the result)
- * 
- * USAGE EXAMPLE:
- * ```typescript
- * import { Consonant } from '@consonant/sdk'
- * 
- * const consonant = new Consonant({ apiKey: process.env.CONSONANT_API_KEY })
- * 
- * // One-time setup: Register an agent
- * await consonant.agents.register({
- *   name: 'complaint-analyzer',
- *   image: 'docker.io/acme/analyzer:v1',
- *   resources: { cpu: '2', memory: '4Gi', timeout: '300s' },
- *   retryPolicy: { maxAttempts: 3, backoff: 'exponential' }
- * })
- * 
- * // Execute and get the result
- * const result = await consonant.agents.execute({
- *   agent: 'complaint-analyzer',
- *   input: { complaint: 'Package never arrived!' }
- * })
- * 
- * console.log(result.severity) // 'high'
- * ```
+ * FEATURES:
+ * - Distributed ID tracking (RequestId, ExecutionId)
+ * - Robust polling with exponential backoff & jitter
+ * - Full type safety for Agent configurations and inputs
+ * - Organization-scoped authentication
  */
+
+import { z } from 'zod';
+
+// =============================================================================
+// VALIDATION SCHEMAS
+// =============================================================================
+
+const ResourcesSchema = z.object({
+  cpu: z.string().regex(/^\d+(m|)$/, 'CPU must be a number or milli-cpus (e.g. "100m", "2")'),
+  memory: z.string().regex(/^\d+(Mi|Gi)$/, 'Memory must be in Mi/Gi (e.g. "512Mi", "4Gi")'),
+  gpu: z.string().regex(/^\d+$/, 'GPU must be an integer count').optional(),
+  timeout: z.string().regex(/^\d+(s|m|h)$/, 'Timeout must be duration (e.g. "30s", "10m")'),
+});
+
+const RetryPolicySchema = z.object({
+  maxAttempts: z.number().int().min(1).max(10),
+  backoff: z.enum(['exponential', 'linear', 'constant']),
+  initialDelay: z.string().optional(),
+});
+
+const AgentConfigSchema = z.object({
+  name: z.string()
+    .min(1)
+    .max(100)
+    .regex(/^[a-z0-9-]+$/, 'Name must be lowercase alphanumeric with hyphens'),
+  image: z.string().min(1, 'Docker image required'),
+  description: z.string().optional(),
+  resources: ResourcesSchema,
+  retryPolicy: RetryPolicySchema,
+  useAgentSandbox: z.boolean().optional(),
+  warmPoolSize: z.number().min(0).optional(),
+  networkPolicy: z.enum(['restricted', 'standard', 'unrestricted']).optional(),
+  environmentVariables: z.record(z.string(), z.string()).optional(),
+});
+
+const ExecutionRequestSchema = z.object({
+  agent: z.string().min(1),
+  input: z.record(z.string(), z.unknown()),
+  priority: z.enum(['high', 'normal', 'low']).default('normal'),
+  cluster: z.string().optional(),
+});
 
 // =============================================================================
 // TYPE DEFINITIONS
@@ -73,11 +90,11 @@ export interface ResourceUsage {
 
 export interface ExecutionResult {
   executionId: string;
-  status: 'completed' | 'failed';
-  result: AgentOutput;
+  status: 'COMPLETED' | 'FAILED' | 'PENDING' | 'QUEUED' | 'RUNNING';
+  result?: AgentOutput;
   durationMs: number;
   resourceUsage: ResourceUsage;
-  completedAt: string;
+  completedAt?: string;
   error?: {
     code: string;
     message: string;
@@ -88,11 +105,10 @@ export interface Agent {
   id: string;
   name: string;
   image: string;
-  description?: string;
+  status: 'PENDING' | 'ACTIVE' | 'FAILED';
   resources: AgentConfig['resources'];
   retryPolicy: AgentConfig['retryPolicy'];
   createdAt: string;
-  updatedAt: string;
 }
 
 export interface ConsonantOptions {
@@ -102,6 +118,67 @@ export interface ConsonantOptions {
   debug?: boolean;
 }
 
+// =============================================================================
+// ERROR HANDLING
+// =============================================================================
+
+export class ConsonantError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 0,
+    public code: string = 'UNKNOWN_ERROR',
+    public details?: any
+  ) {
+    super(message);
+    this.name = 'ConsonantError';
+    Object.setPrototypeOf(this, ConsonantError.prototype);
+  }
+}
+
+// =============================================================================
+// POLLING UTILITY (Exponential Backoff + Jitter)
+// =============================================================================
+
+interface PollOptions<T> {
+  fn: () => Promise<T>;
+  validate: (result: T) => boolean;
+  maxWaitMs: number;
+  initialIntervalMs: number;
+  maxIntervalMs: number;
+  onTimeout: () => Error;
+}
+
+async function pollWithBackoff<T>(options: PollOptions<T>): Promise<T> {
+  const { fn, validate, maxWaitMs, initialIntervalMs, maxIntervalMs, onTimeout } = options;
+  const startTime = Date.now();
+  let currentInterval = initialIntervalMs;
+
+  while (Date.now() - startTime < maxWaitMs) {
+    try {
+      const result = await fn();
+      if (validate(result)) {
+        return result;
+      }
+    } catch (err: any) {
+      // Don't swallow fatal errors, only retry on potentially transient ones
+      if (err instanceof ConsonantError && err.statusCode >= 400 && err.statusCode < 500 && err.statusCode !== 404 && err.statusCode !== 429) {
+        throw err;
+      }
+    }
+
+    // Calculate next interval with jitter
+    const jitter = Math.random() * 0.2 + 0.9; // 0.9 - 1.1
+    await new Promise(resolve => setTimeout(resolve, currentInterval * jitter));
+    currentInterval = Math.min(currentInterval * 1.5, maxIntervalMs);
+  }
+
+  throw onTimeout();
+}
+
+// =============================================================================
+// MAIN SDK CLIENT
+// =============================================================================
+
 export class Consonant {
   private apiKey: string;
   private baseUrl: string;
@@ -109,208 +186,124 @@ export class Consonant {
   private debug: boolean;
 
   constructor(options: ConsonantOptions) {
-    if (!options.apiKey) {
-      throw new Error('API key is required');
-    }
-
+    if (!options.apiKey) throw new Error('Consonant API Key is required');
     this.apiKey = options.apiKey;
-    this.baseUrl = options.baseUrl || 'https://api.consonant.dev';
-    this.timeout = options.timeout || 120000;
+    this.baseUrl = options.baseUrl?.replace(/\/$/, '') || 'https://api.consonant.dev';
+    this.timeout = options.timeout || 300000; // 5 minutes default
     this.debug = options.debug || false;
   }
 
+  /**
+   * Agents Namespace
+   * Focuses on registration and lifecycle.
+   */
   public agents = {
-    register: async (config: AgentConfig): Promise<Agent> => {
-      return this.makeRequest<Agent>('POST', '/api/agents', config);
+    /**
+     * Register or Update an Agent definition.
+     * This is an asynchronous operation that returns a Task tracker.
+     * Use .wait() to block until registration is active.
+     */
+    register: async (config: AgentConfig) => {
+      AgentConfigSchema.parse(config);
+      
+      const response = await this.makeRequest<{ requestId: string; accepted: boolean }>(
+        'POST',
+        '/api/agents/register',
+        config
+      );
+
+      return {
+        requestId: response.requestId,
+        wait: async (options?: { timeoutMs?: number }): Promise<Agent> => {
+          return pollWithBackoff<Agent>({
+            fn: async () => {
+              // Note: We currently don't have a direct 'get agent by name' that's public for SDK?
+              // Actually, we can check a registration status endpoint or list.
+              // For now, using the intended registration polling pattern.
+              const agentsResponse = await this.makeRequest<{ agents: Agent[] }>('GET', `/api/agents?name=${config.name}`);
+              const agent = agentsResponse.agents.find(a => a.name === config.name);
+              if (!agent) throw new ConsonantError('Agent not found yet', 404);
+              return agent;
+            },
+            validate: (agent) => agent.status === 'ACTIVE',
+            maxWaitMs: options?.timeoutMs || 60000, // 1 min for registration
+            initialIntervalMs: 1000,
+            maxIntervalMs: 5000,
+            onTimeout: () => new ConsonantError('Registration timed out', 408, 'REGISTRATION_TIMEOUT')
+          });
+        }
+      };
     },
 
+    /**
+     * Invoke/Execute an Agent.
+     * Standardized way to trigger an agent and wait for results.
+     */
     execute: async (request: {
       agent: string;
       input: AgentInput;
       priority?: Priority;
       cluster?: string;
-    }): Promise<ExecutionResult> => {
-      if (this.debug) {
-        console.log('[Consonant] Executing agent:', request.agent);
-      }
+    }) => {
+      ExecutionRequestSchema.parse(request);
 
-      const response = await this.makeRequest<{ executionId: string; status: string }>(
+      const response = await this.makeRequest<{ executionId: string }>(
         'POST',
-        '/api/executions',
+        '/api/execute',
         request
       );
 
-      if (this.debug) {
-        console.log('[Consonant] Execution queued:', response.executionId);
-      }
-
-      // Wait for completion
-      const result = await this.waitForCompletion(response.executionId);
-      
-      if (this.debug) {
-        console.log('[Consonant] Execution completed:', result.status);
-      }
-
-      return result;
-    },
-
-    list: async (options?: { limit?: number; offset?: number }): Promise<Agent[]> => {
-      const params = new URLSearchParams();
-      if (options?.limit) params.set('limit', options.limit.toString());
-      if (options?.offset) params.set('offset', options.offset.toString());
-
-      const response = await this.makeRequest<{ agents: Agent[] }>(
-        'GET',
-        `/api/agents?${params.toString()}`
-      );
-
-      return response.agents;
-    },
-
-    get: async (agentId: string): Promise<Agent> => {
-      return this.makeRequest<Agent>('GET', `/api/agents/${agentId}`);
-    },
-
-    delete: async (agentId: string): Promise<void> => {
-      await this.makeRequest<{ success: boolean }>('DELETE', `/api/agents/${agentId}`);
-    },
+      return {
+        executionId: response.executionId,
+        wait: async (options?: { timeoutMs?: number }): Promise<ExecutionResult> => {
+          return pollWithBackoff<ExecutionResult>({
+            fn: () => this.makeRequest<ExecutionResult>('GET', `/api/executions/${response.executionId}`),
+            validate: (res) => res.status === 'COMPLETED' || res.status === 'FAILED',
+            maxWaitMs: options?.timeoutMs || this.timeout,
+            initialIntervalMs: 2000,
+            maxIntervalMs: 30000,
+            onTimeout: () => new ConsonantError('Execution timed out', 408, 'EXECUTION_TIMEOUT')
+          });
+        }
+      };
+    }
   };
 
+  /**
+   * Internal Request Helper
+   */
   private async makeRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.baseUrl}${path}`;
-    
+    if (this.debug) console.log(`[Consonant] ${method} ${url}`);
+
     const options: RequestInit = {
       method,
       headers: {
         'X-API-Key': this.apiKey,
         'Content-Type': 'application/json',
+        'User-Agent': 'consonant-sdk-js/1.1.0'
       },
-      ...(body && { body: JSON.stringify(body) }),
+      ...(body ? { body: JSON.stringify(body) } : {}),
     };
 
     try {
       const response = await fetch(url, options);
+      const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
         throw new ConsonantError(
-          errorData.message || `HTTP ${response.status}: ${response.statusText}`,
+          data.message || `HTTP ${response.status}`,
           response.status,
-          errorData.error || 'api_error'
+          data.code || 'API_ERROR',
+          data.details
         );
       }
 
-      return await response.json();
+      return data as T;
     } catch (error: any) {
-      if (error instanceof ConsonantError) {
-        throw error;
-      }
-
-      throw new ConsonantError(`Request failed: ${error.message}`, 0, 'network_error');
+      if (error instanceof ConsonantError) throw error;
+      throw new ConsonantError(`Network failed: ${error.message}`, 0, 'NETWORK_ERROR');
     }
-  }
-
-  /**
-   * Wait for execution completion by polling the status endpoint.
-   * 
-   * This implementation polls the control plane's execution status endpoint
-   * until the execution completes or times out. The polling interval starts
-   * at 2 seconds and increases exponentially up to 30 seconds to balance
-   * responsiveness with server load.
-   * 
-   * FUTURE ENHANCEMENT:
-   * In a future version, this could use Server-Sent Events (SSE) or WebSockets
-   * for real-time updates instead of polling. However, polling is simpler to
-   * implement and works reliably across all network configurations.
-   * 
-   * @param executionId - Execution to wait for
-   * @returns Execution result
-   * @throws ConsonantError if execution fails or times out
-   */
-  private async waitForCompletion(executionId: string): Promise<ExecutionResult> {
-    const maxAttempts = 240; // 2 hours maximum wait time
-    const maxInterval = 30000; // Max 30 seconds between polls
-    let attempts = 0;
-    let interval = 2000; // Start with 2-second intervals
-
-    while (attempts < maxAttempts) {
-      try {
-        // Query the execution status endpoint
-        const status = await this.makeRequest<{
-          executionId: string;
-          status: string;
-          result?: AgentOutput;
-          error?: { code: string; message: string };
-          durationMs?: number;
-          resourceUsage?: ResourceUsage;
-          completedAt?: string;
-        }>('GET', `/api/executions/${executionId}`);
-
-        if (this.debug) {
-          console.log(`[Consonant] Execution status: ${status.status} (attempt ${attempts + 1})`);
-        }
-
-        // Check if completed successfully
-        if (status.status === 'completed') {
-          return {
-            executionId: status.executionId,
-            status: 'completed',
-            result: status.result || {},
-            durationMs: status.durationMs || 0,
-            resourceUsage: status.resourceUsage || {
-              cpuSeconds: 0,
-              memoryMbSeconds: 0,
-            },
-            completedAt: status.completedAt || new Date().toISOString(),
-          };
-        }
-
-        // Check if failed
-        if (status.status === 'failed') {
-          throw new ConsonantError(
-            status.error?.message || 'Execution failed',
-            500,
-            status.error?.code || 'execution_failed'
-          );
-        }
-
-        // Still running - wait before polling again
-        await new Promise(resolve => setTimeout(resolve, interval));
-        
-        // Exponential backoff up to maxInterval
-        interval = Math.min(interval * 1.5, maxInterval);
-        attempts++;
-
-      } catch (error) {
-        // If the error is a ConsonantError, rethrow it
-        if (error instanceof ConsonantError) {
-          throw error;
-        }
-
-        // For network errors, retry with backoff
-        if (this.debug) {
-          console.log(`[Consonant] Polling error (will retry): ${error}`);
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, interval));
-        interval = Math.min(interval * 1.5, maxInterval);
-        attempts++;
-      }
-    }
-
-    // Timeout after maximum attempts
-    throw new ConsonantError(
-      'Execution timed out after 2 hours. The agent may still be running.',
-      408,
-      'execution_timeout'
-    );
-  }
-}
-
-export class ConsonantError extends Error {
-  constructor(message: string, public statusCode: number, public code: string) {
-    super(message);
-    this.name = 'ConsonantError';
   }
 }
 

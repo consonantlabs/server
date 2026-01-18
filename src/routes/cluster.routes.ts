@@ -3,7 +3,7 @@ import { registerCluster } from '../controllers/clusters.controller.js';
 
 export async function clusterRoutes(app: FastifyInstance) {
   app.post(
-    '/clusters',
+    '/',
     {
       schema: {
         body: {

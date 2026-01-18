@@ -1,468 +1,438 @@
 /**
  * @fileoverview Agent Execution Workflow
- * @module inngest/functions/execution-workflow
+ * @module services/inngest/functions/execution-workflow
  * 
- * This is the CORE of the Consonant agent execution platform.
+ * Production-grade Inngest function for orchestrating agent execution.
  * 
- * When a user calls execute() in the SDK, it triggers this Inngest function.
- * The function orchestrates the complete lifecycle of running an agent:
+ * FLOW:
+ * 1. Validate agent exists and get config
+ * 2. Select best cluster for execution
+ * 3. Queue work to cluster via Redis
+ * 4. Wait for completion event from relayer
+ * 5. Handle success or failure with retries
  * 
- * 1. Create execution record in database
- * 2. Select the best cluster for this execution
- * 3. Queue the work to that cluster's Redis queue
- * 4. WAIT for completion (could take seconds, minutes, or hours)
- * 5. Return the result to the SDK caller
- * 
- * THE KEY INNOVATION:
- * Step 4 uses Inngest's waitForEvent() which suspends the function without
- * consuming resources. The SDK's execute() call appears synchronous to the
- * user, even though the agent might run for 30 minutes. When the agent
- * completes, Inngest wakes up this function right where it left off and
- * returns the result.
- * 
- * This gives you:
- * - Synchronous semantics (SDK returns the result)
- * - Over asynchronous distributed execution (agent runs in Kubernetes)
- * - With full durability (survives server restarts)
- * - And zero polling (no wasteful status checks)
+ * KEY PATTERNS:
+ * - Each step is idempotent and durable
+ * - Uses Inngest's waitForEvent for sync-like SDK experience
+ * - Automatic retries with exponential backoff
+ * - Organization-scoped multi-tenancy
  */
 
 import { inngest } from '../client.js';
-import { prismaManager } from '../../db/manager.js';
-import { getAgentRegistry } from '../../agent-registry.js';
-import { getClusterSelection } from '../../cluster-selection.js';
-import { getWorkQueue, type WorkItem } from '../../redis/queue.js';
 import { logger } from '../../../utils/logger.js';
-import type { AgentOutput, ResourceUsage } from '../events.js';
+import { prismaManager } from '../../db/manager.js';
+import { getAgentService } from '../../agent.service.js';
+import { getClusterService } from '../../cluster.selection.js';
+import { getWorkQueue } from '../../redis/queue.js';
+import type { WorkItem } from '../../redis/queue.js';
 
 /**
- * Agent Execution Workflow
- * 
- * This is the durable orchestration function that manages agent execution
- * from start to finish. Each step is automatically checkpointed by Inngest,
- * so if the server crashes, execution resumes from the last completed step.
+ * Main execution workflow function.
+ * Triggered by 'agent.execution.requested' event from SDK.
  */
 export const executionWorkflow = inngest.createFunction(
     {
         id: 'agent-execution-workflow',
         name: 'Agent Execution Workflow',
-        // Retry configuration for the workflow itself
         retries: 3,
-        // Concurrency limit to prevent overwhelming the database
         concurrency: {
             limit: 100,
-            key: 'event.data.apiKeyId', // Limit per customer
+            key: 'event.data.organizationId',
         },
     },
-    // Trigger: When SDK calls execute()
     { event: 'agent.execution.requested' },
     async ({ event, step }) => {
-        const { executionId, agentId, apiKeyId, input, priority, cluster: preferredCluster } = event.data;
+        const { executionId, agentId, organizationId, input, priority, cluster: preferredCluster } = event.data;
 
         logger.info({
             executionId,
             agentId,
+            organizationId,
             priority,
-            apiKeyId,
         }, 'Execution workflow started');
 
-        // =========================================================================
-        // STEP 1: CREATE EXECUTION RECORD
-        // =========================================================================
-
-        const execution = await step.run('create-execution', async () => {
+        // =====================================================================
+        // STEP 1: CREATE EXECUTION RECORD (DB)
+        // =====================================================================
+        await step.run('create-execution-db', async () => {
             const prisma = await prismaManager.getClient();
+            const agentService = getAgentService();
 
-            try {
-                // Fetch agent configuration (needed for cluster selection)
-                const agentRegistry = getAgentRegistry();
-                const agent = await agentRegistry.get(apiKeyId, agentId);
+            // 1. Validate Agent exists and is active
+            const agent = await agentService.get(organizationId, agentId);
+            if (!agent) throw new Error(`Agent ${agentId} not found`);
+            if (agent.status !== 'ACTIVE') throw new Error(`Agent ${agent.name} is not active`);
 
-                if (!agent) {
-                    throw new Error(`Agent ${agentId} not found for API key`);
-                }
-
-                // Create the execution record
-                const exec = await prisma.execution.create({
-                    data: {
-                        id: executionId,
-                        agentId: agent.id,
-                        status: 'pending',
-                        input: input as any,
-                        maxAttempts: (agent.retryPolicy as any)?.maxAttempts || 3,
-                    },
-                });
-
-                logger.info({
-                    executionId,
+            // 2. Create Execution (Upsert for idempotency)
+            const execution = await prisma.execution.upsert({
+                where: { id: executionId },
+                update: {}, // No-op if exists
+                create: {
+                    id: executionId,
                     agentId: agent.id,
-                    status: 'pending',
-                }, 'Execution record created');
+                    status: 'PENDING',
+                    input: input as any, // Cast generic object to JsonValue
+                    priority: priority?.toUpperCase() as any || 'NORMAL',
+                    maxAttempts: (agent.retryPolicy as any)?.maxAttempts || 3,
+                },
+            });
 
-                return {
-                    executionId: exec.id,
-                    agent: {
-                        id: agent.id,
-                        name: agent.name,
-                        image: agent.image,
-                        resources: agent.resources,
-                        retryPolicy: agent.retryPolicy,
-                        useAgentSandbox: agent.useAgentSandbox,
-                        warmPoolSize: agent.warmPoolSize,
-                        networkPolicy: agent.networkPolicy,
-                        environmentVariables: agent.environmentVariables,
+            // 3. Log Audit Record
+            await prisma.auditLog.create({
+                data: {
+                    organizationId,
+                    action: 'EXECUTION_TRIGGERED',
+                    resourceType: 'Execution',
+                    resourceId: executionId,
+                    metadata: {
+                        agentId: agent.id,
+                        agentName: agent.name,
+                        priority
                     },
-                };
-            } finally {
-                // No disconnect needed for prismaManager
-            }
+                }
+            });
+
+            return execution;
         });
 
-        // =========================================================================
-        // STEP 2: SELECT CLUSTER
-        // =========================================================================
+        // =====================================================================
+        // STEP 2: GET AGENT CONFIG
+        // =====================================================================
+        const agent = await step.run('get-agent-config', async () => {
+            const agentService = getAgentService();
+            const agentRecord = await agentService.get(organizationId, agentId);
+            // We know it exists from Step 1, but type safety needs it
+            if (!agentRecord) throw new Error(`Agent ${agentId} not found`);
 
+            return {
+                id: agentRecord.id,
+                name: agentRecord.name,
+                image: agentRecord.image,
+                resources: agentRecord.resources as any,
+                retryPolicy: agentRecord.retryPolicy as any,
+                useAgentSandbox: agentRecord.useAgentSandbox,
+                warmPoolSize: agentRecord.warmPoolSize,
+                networkPolicy: agentRecord.networkPolicy,
+                environmentVariables: agentRecord.environmentVariables as any,
+            };
+        });
+
+        // =====================================================================
+        // STEP 2: SELECT CLUSTER
+        // =====================================================================
         const selectedCluster = await step.run('select-cluster', async () => {
             const prisma = await prismaManager.getClient();
+            const clusterService = getClusterService();
 
-            try {
-                const clusterSelection = getClusterSelection();
-
-                // If user specified a preferred cluster, try to use it
-                if (preferredCluster) {
-                    const cluster = await prisma.cluster.findFirst({
-                        where: {
-                            id: preferredCluster,
-                            organizationId: (await prisma.apiKey.findUnique({ where: { id: apiKeyId } }))?.organizationId,
-                            status: 'ACTIVE',
-                        },
-                    });
-
-                    if (cluster) {
-                        logger.info({
-                            executionId,
-                            clusterId: cluster.id,
-                        }, 'Using preferred cluster');
-                        return cluster;
-                    } else {
-                        logger.warn({
-                            executionId,
-                            preferredCluster,
-                        }, 'Preferred cluster not available, selecting automatically');
-                    }
-                }
-
-                // Select best cluster based on requirements and load
-                const cluster = await clusterSelection.selectCluster(
-                    apiKeyId,
-                    {
-                        resources: execution.agent.resources as any,
-                        useAgentSandbox: execution.agent.useAgentSandbox,
+            // Try preferred cluster first
+            if (preferredCluster) {
+                const cluster = await prisma.cluster.findFirst({
+                    where: {
+                        id: preferredCluster,
+                        organizationId,
+                        status: 'ACTIVE',
                     },
-                    {
-                        requireGpu: !!(execution.agent.resources as any).gpu,
-                        requireSandbox: execution.agent.useAgentSandbox,
-                    }
-                );
-
-                // Update execution record with selected cluster
-                await prisma.execution.update({
-                    where: { id: executionId },
-                    data: { clusterId: cluster.id },
                 });
 
-                logger.info({
-                    executionId,
-                    clusterId: cluster.id,
-                    clusterName: cluster.name,
-                }, 'Cluster selected');
-
-                return cluster;
-            } finally {
-                // No disconnect needed for prismaManager
+                if (cluster) {
+                    logger.info({ executionId, clusterId: cluster.id }, 'Using preferred cluster');
+                    return cluster;
+                }
+                logger.warn({ executionId, preferredCluster }, 'Preferred cluster not available');
             }
+
+            // Auto-select best cluster
+            const cluster = await clusterService.selectCluster(
+                organizationId,
+                {
+                    resources: agent.resources,
+                    useAgentSandbox: agent.useAgentSandbox,
+                },
+                {
+                    requireGpu: !!agent.resources.gpu,
+                    requireSandbox: agent.useAgentSandbox,
+                }
+            );
+
+            logger.info({
+                executionId,
+                clusterId: cluster.id,
+                clusterName: cluster.name,
+            }, 'Cluster selected');
+
+            return cluster;
         });
 
-        // =========================================================================
-        // STEP 3: QUEUE WORK TO CLUSTER
-        // =========================================================================
-
+        // =====================================================================
+        // STEP 3: UPDATE STATUS & QUEUE WORK
+        // =====================================================================
         await step.run('queue-work', async () => {
             const prisma = await prismaManager.getClient();
+            const workQueue = getWorkQueue();
 
-            try {
-                const workQueue = getWorkQueue();
+            // Update execution with cluster assignment
+            await prisma.execution.update({
+                where: { id: executionId },
+                data: {
+                    clusterId: selectedCluster.id,
+                    status: 'QUEUED',
+                    queuedAt: new Date(),
+                },
+            });
 
-                // Build work item with all details the relayer needs
-                const workItem: WorkItem = {
+            // Build work item for relayer
+            const workItem: WorkItem = {
+                executionId,
+                agentId: agent.id,
+                agentName: agent.name,
+                agentImage: agent.image,
+                input: input as any,
+                resources: {
+                    cpu: agent.resources.cpu,
+                    memory: agent.resources.memory,
+                    gpu: agent.resources.gpu,
+                    timeout: agent.resources.timeout,
+                },
+                retryPolicy: {
+                    maxAttempts: agent.retryPolicy.maxAttempts,
+                    backoff: agent.retryPolicy.backoff,
+                    initialDelay: agent.retryPolicy.initialDelay,
+                },
+                useAgentSandbox: agent.useAgentSandbox,
+                warmPoolSize: agent.warmPoolSize,
+                networkPolicy: agent.networkPolicy,
+                environmentVariables: agent.environmentVariables,
+            };
+
+            // Queue to Redis for gRPC pickup
+            await workQueue.enqueue(
+                selectedCluster.id,
+                workItem,
+                priority as any || 'normal'
+            );
+
+            // Emit queued event
+            await inngest.send({
+                name: 'agent.execution.queued',
+                data: {
                     executionId,
-                    agentId: execution.agent.id,
-                    agentName: execution.agent.name,
-                    agentImage: execution.agent.image,
-                    input: input,
-                    resources: execution.agent.resources as any,
-                    retryPolicy: execution.agent.retryPolicy as any,
-                    useAgentSandbox: execution.agent.useAgentSandbox,
-                    warmPoolSize: execution.agent.warmPoolSize,
-                    networkPolicy: execution.agent.networkPolicy,
-                    environmentVariables: (execution.agent.environmentVariables as any) || {},
-                };
+                    agentId: agent.id,
+                    clusterId: selectedCluster.id,
+                    queuedAt: new Date().toISOString(),
+                },
+            });
 
-                // Push to cluster's Redis queue
-                await workQueue.enqueue(
-                    selectedCluster.id,
-                    workItem,
-                    priority
-                );
+            logger.info({
+                executionId,
+                clusterId: selectedCluster.id,
+            }, 'Work queued to cluster');
+        });
 
-                // Update execution status to "queued"
+        // =====================================================================
+        // STEP 4: WAIT FOR COMPLETION (up to timeout)
+        // =====================================================================
+        const timeoutMs = parseTimeout(agent.resources.timeout) + 60000; // Add 1min buffer
+
+        const completionEvent = await step.waitForEvent('wait-for-completion', {
+            event: 'agent.execution.completed',
+            match: 'data.executionId',
+            timeout: `${Math.ceil(timeoutMs / 1000)}s`,
+        });
+
+        // =====================================================================
+        // STEP 5: PROCESS RESULT
+        // =====================================================================
+        if (completionEvent) {
+            // Execution completed successfully
+            await step.run('process-success', async () => {
+                const prisma = await prismaManager.getClient();
+
                 await prisma.execution.update({
                     where: { id: executionId },
                     data: {
-                        status: 'queued',
-                        queuedAt: new Date(),
-                    },
-                });
-
-                // Emit event for monitoring
-                await inngest.send({
-                    name: 'agent.execution.queued',
-                    data: {
-                        executionId,
-                        agentId: execution.agent.id,
-                        clusterId: selectedCluster.id,
-                        queuedAt: new Date().toISOString(),
+                        status: 'COMPLETED',
+                        result: completionEvent.data.result as any,
+                        completedAt: new Date(),
+                        durationMs: completionEvent.data.durationMs,
+                        resourceUsage: completionEvent.data.resourceUsage as any,
                     },
                 });
 
                 logger.info({
                     executionId,
-                    clusterId: selectedCluster.id,
-                    priority,
-                }, 'Work queued to cluster');
-            } finally {
-                // No disconnect needed for prismaManager
-            }
-        });
+                    durationMs: completionEvent.data.durationMs,
+                }, 'Execution completed successfully');
+            });
 
-        // =========================================================================
-        // STEP 4: WAIT FOR COMPLETION
-        // =========================================================================
-        // 
-        // THIS IS THE MAGIC STEP
-        // 
-        // The function suspends here until the agent completes (or timeout).
-        // During this time:
-        // - The SDK's execute() call is waiting
-        // - The server can restart, deploy new code, anything
-        // - No resources are consumed
-        // - Inngest maintains the state
-        // 
-        // When 'agent.execution.completed' event fires (sent by gRPC server when
-        // relayer reports completion), Inngest wakes up this function right here
-        // and continues to step 5.
-        // =========================================================================
-
-        const completionResult = await step.waitForEvent('wait-for-completion', {
-            event: 'agent.execution.completed',
-            match: 'data.executionId',
-            timeout: '2h', // Maximum time to wait
-        });
-
-        // Check if we got completion or timeout
-        if (!completionResult) {
-            // Timeout - agent took too long
-            logger.error({
+            return {
+                status: 'completed',
                 executionId,
-                timeout: '2h',
-            }, 'Execution timed out waiting for completion');
-
-            // Mark execution as failed
-            try {
-                const prisma = await prismaManager.getClient();
-                await prisma.execution.update({
-                    where: { id: executionId },
-                    data: {
-                        status: 'failed',
-                        error: 'Execution timed out after 2 hours',
-                        completedAt: new Date(),
-                    },
-                });
-            } finally {
-                // No disconnect needed
-            }
-
-            throw new Error('Execution timed out');
+                result: completionEvent.data.result,
+                durationMs: completionEvent.data.durationMs,
+            };
         }
 
-        // =========================================================================
-        // STEP 5: RETURN RESULT
-        // =========================================================================
+        // =====================================================================
+        // TIMEOUT OR FAILURE HANDLING
+        // =====================================================================
+        await step.run('handle-timeout', async () => {
+            const prisma = await prismaManager.getClient();
 
-        const { result, durationMs, resourceUsage } = completionResult.data;
+            await prisma.execution.update({
+                where: { id: executionId },
+                data: {
+                    status: 'FAILED',
+                    error: 'Execution timed out waiting for completion',
+                    completedAt: new Date(),
+                },
+            });
 
-        logger.info({
-            executionId,
-            durationMs,
-            status: 'completed',
-        }, 'Execution completed successfully');
+            logger.warn({ executionId }, 'Execution timed out');
+        });
 
-        // Return the result - this goes back to the SDK caller!
-        // The user's execute() call finally resolves with this value
         return {
+            status: 'timeout',
             executionId,
-            status: 'completed' as const,
-            result: result as AgentOutput,
-            durationMs,
-            resourceUsage: resourceUsage as ResourceUsage,
-            completedAt: new Date().toISOString(),
+            error: 'Execution timed out',
         };
     }
 );
 
 /**
- * Agent Execution Failure Handler
- * 
- * Handles failed executions and implements retry logic.
- * When an agent fails, this function determines if we should retry
- * and reschedules if appropriate.
+ * Handler for execution failures from relayer.
+ * Implements retry logic with exponential backoff.
  */
 export const executionFailureHandler = inngest.createFunction(
     {
         id: 'agent-execution-failure-handler',
         name: 'Agent Execution Failure Handler',
+        retries: 0, // We handle our own retries
     },
     { event: 'agent.execution.failed' },
     async ({ event, step }) => {
-        const { executionId, error, attempt, willRetry } = event.data;
+        const { executionId, error, attempt } = event.data;
+        const maxAttempts = 3; // Default max attempts or could fetch from DB
 
         logger.warn({
             executionId,
+            error: error.message,
             attempt,
-            error,
-            willRetry,
+            maxAttempts,
         }, 'Execution failed');
 
-        if (!willRetry) {
-            // No more retries - mark as permanently failed
-            await step.run('mark-exhausted', async () => {
-                try {
-                    const prisma = await prismaManager.getClient();
-                    await prisma.execution.update({
-                        where: { id: executionId },
-                        data: {
-                            status: 'failed',
-                            error: `Failed after ${attempt} attempts: ${error.message}`,
-                            completedAt: new Date(),
-                        },
-                    });
+        // Check if we should retry
+        if (attempt < maxAttempts) {
+            await step.run('schedule-retry', async () => {
+                const prisma = await prismaManager.getClient();
 
-                    // Emit exhausted event
-                    await inngest.send({
-                        name: 'agent.execution.exhausted',
-                        data: {
-                            executionId,
-                            agentId: event.data.agentId,
-                            error: {
-                                code: error.code,
-                                message: error.message,
-                                allAttempts: [], // Would need to fetch from execution history
-                            },
-                            exhaustedAt: new Date().toISOString(),
-                        },
-                    });
+                // Get execution with agent for retry
+                const execution = await prisma.execution.findUnique({
+                    where: { id: executionId },
+                    include: { agent: true },
+                });
 
-                    logger.error({
-                        executionId,
-                        finalAttempt: attempt,
-                    }, 'Execution permanently failed');
-                } finally {
-                    // No disconnect needed
+                if (!execution) {
+                    throw new Error(`Execution ${executionId} not found`);
                 }
+
+                // Calculate backoff delay
+                const retryPolicy = execution.agent.retryPolicy as any;
+                const delaySeconds = calculateBackoff(attempt, retryPolicy);
+                const nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
+
+                // Update execution
+                await prisma.execution.update({
+                    where: { id: executionId },
+                    data: {
+                        attempt: attempt + 1,
+                        nextRetryAt,
+                        status: 'PENDING',
+                    },
+                });
+
+                // Schedule retry via Inngest with delay
+                await inngest.send({
+                    name: 'agent.execution.requested',
+                    data: {
+                        executionId,
+                        agentId: execution.agentId,
+                        organizationId: execution.agent.organizationId,
+                        input: execution.input as any,
+                        priority: 'normal',
+                        requestedAt: new Date().toISOString(),
+                    },
+                    ts: Date.now() + (delaySeconds * 1000),
+                });
+
+                logger.info({
+                    executionId,
+                    nextAttempt: attempt + 1,
+                    delaySeconds,
+                }, 'Retry scheduled');
             });
 
-            // Wake up the waiting workflow with failure
-            await inngest.send({
-                name: 'agent.execution.completed',
+            return { status: 'retry_scheduled', nextAttempt: attempt + 1 };
+        }
+
+        // Max retries exceeded - mark as permanently failed
+        await step.run('mark-failed', async () => {
+            const prisma = await prismaManager.getClient();
+
+            await prisma.execution.update({
+                where: { id: executionId },
                 data: {
-                    executionId,
-                    agentId: event.data.agentId,
-                    clusterId: event.data.clusterId,
-                    result: {},
-                    durationMs: 0,
-                    resourceUsage: {
-                        cpuSeconds: 0,
-                        memoryMbSeconds: 0,
-                    },
-                    completedAt: new Date().toISOString(),
+                    status: 'FAILED',
+                    error: `Failed after ${maxAttempts} attempts: ${error.message}`,
+                    completedAt: new Date(),
                 },
             });
-        } else {
-            // Will retry - reschedule the execution
-            await step.run('schedule-retry', async () => {
-                try {
-                    const prisma = await prismaManager.getClient();
-                    // Get execution record to find agent details
-                    const execution = await prisma.execution.findUnique({
-                        where: { id: executionId },
-                        include: { agent: true },
-                    });
 
-                    if (!execution) {
-                        logger.error({ executionId }, 'Execution not found for retry');
-                        return;
-                    }
+            logger.error({
+                executionId,
+                attempts: maxAttempts,
+            }, 'Execution permanently failed');
+        });
 
-                    // Calculate retry delay based on backoff strategy
-                    const retryPolicy = execution.agent.retryPolicy as {
-                        backoff: 'exponential' | 'linear' | 'constant';
-                        initialDelay?: string;
-                    };
-
-                    let delaySeconds = 1;
-                    if (retryPolicy.backoff === 'exponential') {
-                        delaySeconds = Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s, ...
-                    } else if (retryPolicy.backoff === 'linear') {
-                        delaySeconds = attempt; // 1s, 2s, 3s, 4s, ...
-                    }
-
-                    const nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
-
-                    // Update execution for next attempt
-                    await prisma.execution.update({
-                        where: { id: executionId },
-                        data: {
-                            attempt: attempt + 1,
-                            nextRetryAt,
-                            status: 'pending',
-                        },
-                    });
-
-                    logger.info({
-                        executionId,
-                        nextAttempt: attempt + 1,
-                        delaySeconds,
-                    }, 'Retry scheduled');
-
-                    // Schedule retry using Inngest's built-in delay mechanism
-                    // This ensures the retry happens at the right time even if the server restarts
-                    await inngest.send({
-                        name: 'agent.execution.requested',
-                        data: {
-                            executionId,
-                            agentId: execution.agentId,
-                            apiKeyId: execution.agent.apiKeyId, // Renamed from apiKeyHash
-                            input: execution.input as any,
-                            priority: 'normal',
-                            requestedAt: new Date().toISOString(),
-                        },
-                        // Inngest will delay this event by the calculated retry delay
-                        ts: Date.now() + (delaySeconds * 1000),
-                    });
-                } finally {
-                    // No disconnect needed
-                }
-            });
-        }
+        return { status: 'permanently_failed', attempts: maxAttempts };
     }
 );
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * Parse timeout string to milliseconds.
+ * Supports formats: "300s", "5m", "1h"
+ */
+function parseTimeout(timeout: string): number {
+    const match = timeout.match(/^(\d+)(s|m|h)$/);
+    if (!match) return 300000; // Default 5 minutes
+
+    const value = parseInt(match[1]);
+    const unit = match[2];
+
+    switch (unit) {
+        case 's': return value * 1000;
+        case 'm': return value * 60 * 1000;
+        case 'h': return value * 60 * 60 * 1000;
+        default: return 300000;
+    }
+}
+
+/**
+ * Calculate retry backoff delay in seconds.
+ */
+function calculateBackoff(attempt: number, retryPolicy: any): number {
+    const initialDelay = parseTimeout(retryPolicy.initialDelay || '1s') / 1000;
+
+    switch (retryPolicy.backoff) {
+        case 'exponential':
+            return initialDelay * Math.pow(2, attempt);
+        case 'linear':
+            return initialDelay * (attempt + 1);
+        case 'constant':
+        default:
+            return initialDelay;
+    }
+}

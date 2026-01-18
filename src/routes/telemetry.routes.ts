@@ -52,67 +52,22 @@ export async function telemetryRoutes(app: FastifyInstance): Promise<void> {
    * - Pagination metadata
    */
   app.get(
-    '/organizations/:organizationId/traces',
+    '/traces',
     listTraces
   );
 
-  /**
-   * Get a complete trace by trace ID.
-   * 
-   * GET /organizations/:organizationId/traces/:traceId
-   * 
-   * Returns:
-   * - All spans for the trace
-   * - Spans nested by parent-child relationships
-   * - Total trace duration
-   * - Span count
-   */
   app.get(
-    '/organizations/:organizationId/traces/:traceId',
+    '/traces/:traceId',
     getTrace
   );
 
-  /**
-   * List metrics for an organization.
-   * 
-   * GET /organizations/:organizationId/metrics
-   * 
-   * Query Parameters:
-   * - startTime: ISO 8601 date (optional)
-   * - endTime: ISO 8601 date (optional)
-   * - name: Metric name filter (optional)
-   * - type: Metric type (GAUGE, COUNTER, HISTOGRAM, SUMMARY) (optional)
-   * - limit: Number of results (default: 50, max: 1000)
-   * - offset: Pagination offset (default: 0)
-   * 
-   * Returns:
-   * - Array of metric data points
-   * - Pagination metadata
-   */
   app.get(
-    '/organizations/:organizationId/metrics',
+    '/metrics',
     listMetrics
   );
 
-  /**
-   * List logs for an organization.
-   * 
-   * GET /organizations/:organizationId/logs
-   * 
-   * Query Parameters:
-   * - startTime: ISO 8601 date (optional)
-   * - endTime: ISO 8601 date (optional)
-   * - severity: Log severity (TRACE, DEBUG, INFO, WARN, ERROR, FATAL) (optional)
-   * - search: Full-text search in log message (optional)
-   * - limit: Number of results (default: 50, max: 1000)
-   * - offset: Pagination offset (default: 0)
-   * 
-   * Returns:
-   * - Array of log entries
-   * - Pagination metadata
-   */
   app.get(
-    '/organizations/:organizationId/logs',
+    '/logs',
     listLogs
   );
 }

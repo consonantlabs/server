@@ -79,11 +79,20 @@ export const processRequestTimeline = inngest.createFunction(
     // Step 2: Store timeline in database
     await step.run('store-timeline', async () => {
       try {
-        await prismaManager.getClient();
+        const prisma = await prismaManager.getTelemetryClient();
 
-        // TODO: Store in separate TimescaleDB once dual database is set up
-        // For now, we log the timeline for debugging
-        // In production, this would insert into a request_timelines hypertable
+        await prisma.requestLog.create({
+          data: {
+            requestId: timeline.requestId,
+            organizationId: timeline.organizationId,
+            method: timeline.method,
+            path: timeline.path,
+            statusCode: timeline.statusCode,
+            durationMs: Math.round(timeline.duration),
+            timestamp: new Date(timeline.timestamp),
+            timeline: timeline.events as any, // Store full events as JSON
+          },
+        });
 
         internalLogger.info(
           {
@@ -95,61 +104,8 @@ export const processRequestTimeline = inngest.createFunction(
             organizationId: timeline.organizationId,
             eventCount: timeline.events.length,
           },
-          'Request timeline recorded'
+          'Request timeline recorded to DB'
         );
-
-        // Calculate event statistics
-        const eventStats = timeline.events.reduce((acc, event) => {
-          const category = event.name.split('.')[0]; // e.g., 'database', 'middleware'
-          if (!acc[category]) {
-            acc[category] = { count: 0, totalDuration: 0 };
-          }
-          acc[category].count++;
-          acc[category].totalDuration += event.duration;
-          return acc;
-        }, {} as Record<string, { count: number; totalDuration: number }>);
-
-        internalLogger.debug(
-          {
-            requestId: timeline.requestId,
-            eventStats,
-          },
-          'Timeline event statistics'
-        );
-
-        /* PRODUCTION CODE (when dual database is ready):
-        
-        await client.$executeRaw`
-          INSERT INTO request_timelines (
-            request_id,
-            trace_id,
-            organization_id,
-            method,
-            path,
-            query_params,
-            status_code,
-            start_time,
-            end_time,
-            duration,
-            events,
-            timestamp
-          ) VALUES (
-            ${timeline.requestId},
-            ${timeline.traceId},
-            ${timeline.organizationId},
-            ${timeline.method},
-            ${timeline.path},
-            ${JSON.stringify(timeline.query)},
-            ${timeline.statusCode},
-            ${timeline.startTime},
-            ${timeline.endTime},
-            ${timeline.duration},
-            ${JSON.stringify(timeline.events)},
-            ${timeline.timestamp}
-          )
-        `;
-        
-        */
 
         return { stored: true };
       } catch (error) {

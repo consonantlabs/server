@@ -103,7 +103,7 @@ export async function createApiKey(
         keyHash,
         keyPrefix: apiKey.substring(0, 8),
         expiresAt: expiresAt ? new Date(expiresAt) : null,
-        rateLimit: rateLimit || RATE_LIMITS.API_KEY_DEFAULT,
+        rateLimit: rateLimit ?? RATE_LIMITS.API_KEY_DEFAULT,
       },
     });
 
@@ -302,7 +302,7 @@ export async function rotateApiKey(
       name: EVENT_TYPES.API_KEY_ROTATED,
       data: {
         organizationId,
-        keyId,
+        keyId: keyId!,
         timestamp: new Date().toISOString(),
       },
     });
@@ -399,7 +399,7 @@ export async function revokeApiKey(
       name: EVENT_TYPES.API_KEY_REVOKED,
       data: {
         organizationId,
-        keyId,
+        keyId: keyId!,
         timestamp: new Date().toISOString(),
       },
     });

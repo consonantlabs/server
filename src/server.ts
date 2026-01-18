@@ -119,15 +119,15 @@ async function initializeServices(app: FastifyInstance): Promise<void> {
   initWorkQueue(redisClient.getClient());
   logger.info('✓ Work queue initialized');
 
-  // 4. Initialize Agent Registry
-  const { initAgentRegistry } = await import('./services/agent-registry.js');
-  initAgentRegistry(await prismaManager.getClient());
-  logger.info('✓ Agent registry initialized');
+  // 4. Initialize Agent Service
+  const { initAgentService } = await import('./services/agent.service.js');
+  await initAgentService(await prismaManager.getClient());
+  logger.info('✓ Agent service initialized');
 
-  // 5. Initialize Cluster Selection
-  const { initClusterSelection } = await import('./services/cluster-selection.js');
-  initClusterSelection(await prismaManager.getClient());
-  logger.info('✓ Cluster selection initialized');
+  // 5. Initialize Cluster Service
+  const { initClusterService } = await import('./services/cluster.selection.js');
+  await initClusterService(await prismaManager.getClient());
+  logger.info('✓ Cluster service initialized');
 
   // 6. Initialize API Key Service
   const { initApiKeyService } = await import('./services/api-key.service.js');
@@ -162,6 +162,11 @@ async function registerPlugins(app: FastifyInstance): Promise<void> {
     global: true,
     encodings: ['gzip', 'deflate'],
   });
+
+  // Passport Authentication
+  logger.info('Registering Passport plugin...');
+  const passportPlugin = await import('./plugins/passport.plugin.js');
+  await app.register(passportPlugin.default);
 
   logger.info('✓ Plugins registered');
 }
@@ -227,6 +232,11 @@ async function registerRoutes(app: FastifyInstance): Promise<void> {
   logger.info('Registering request timeline plugin...');
   const timelinePlugin = await import('./plugins/request-timeline.plugin.js');
   await app.register(timelinePlugin.default);
+
+  // Register rate limiting plugin
+  logger.info('Registering rate limit plugin...');
+  const rateLimitPlugin = await import('./plugins/rate-limit.plugin.js');
+  await app.register(rateLimitPlugin.default);
 
   // Register API routes
   const { registerRoutes } = await import('./routes/index.js');
@@ -327,7 +337,7 @@ function setupErrorHandler(app: FastifyInstance): void {
 function setupGracefulShutdown(app: FastifyInstance): void {
   closeWithGrace(
     { delay: TIMEOUTS.SHUTDOWN_MS },
-    async ({ signal, err }) => {
+    async ({ signal, err }: { signal: string; err?: Error }) => {
       if (err) {
         logger.error({ err }, 'Error triggered shutdown');
       }
@@ -369,60 +379,48 @@ function setupGracefulShutdown(app: FastifyInstance): void {
 }
 
 /**
- * Start the server.
- * 
- * This is the main application entry point that orchestrates
- * the entire startup sequence.
+ * Build the Fastify application instance.
  */
-async function start(): Promise<void> {
+export async function buildApp(): Promise<FastifyInstance> {
+  const app = createFastifyServer();
+
   try {
-    logger.info('🚀 Starting Consonant Control Plane...');
-
-
-    // 1. Initialize OpenTelemetry (must be first)
     await initializeOpenTelemetry();
-
-    // 2. Create Fastify server
-    const app = createFastifyServer();
-    logger.info('✓ Fastify server created');
-
-    // 3. Initialize services
     await initializeServices(app);
-    initWorkQueue(redisClient.getClient());
-
-
-    grpcServer = await startGrpcServer(env.GRPC_PORT);
-
-    logger.info(`✓ gRPC server listening on ${env.GRPC_HOST}:${env.GRPC_PORT}`);
-
-    // 4. Register plugins
     await registerPlugins(app);
 
-    // 5. Set up request hooks
     setupContextInjection(app);
     setupResponseLogging(app);
     setupErrorHandler(app);
 
-    // 6. Register routes
     await registerRoutes(app);
-
-    // 7. Set up graceful shutdown
     setupGracefulShutdown(app);
 
-    // 8. Wait for server to be ready
     await app.ready();
-    logger.info('✓ Fastify server ready');
+    return app;
+  } catch (error) {
+    logger.error({ err: error }, 'Failed to build app');
+    throw error;
+  }
+}
 
-    // 9. Start HTTP server
+/**
+ * Main application entry point.
+ */
+export async function start(): Promise<void> {
+  try {
+    logger.info('🚀 Starting Consonant Control Plane...');
+    const app = await buildApp();
+
+    grpcServer = await startGrpcServer(env.GRPC_PORT);
+    logger.info(`✓ gRPC server listening on ${env.GRPC_HOST}:${env.GRPC_PORT}`);
+
     await app.listen({
       port: env.PORT,
       host: env.HOST,
     });
 
     logger.info(`✓ HTTP server listening on http://${env.HOST}:${env.PORT}`);
-    logger.info(`✓ Health check: http://${env.HOST}:${env.PORT}${API_PATHS.HEALTH}`);
-    logger.info(`✓ Inngest: http://${env.HOST}:${env.PORT}${API_PATHS.INNGEST}`);
-
     logger.info('🎉 Server started successfully');
   } catch (error) {
     logger.fatal({ err: error }, 'Failed to start server');
@@ -430,5 +428,7 @@ async function start(): Promise<void> {
   }
 }
 
-// Start the server
-start();
+// Start the server if this file is run directly
+if (process.argv[1]?.includes('server.ts') || process.argv[1]?.includes('server.js')) {
+  start();
+}

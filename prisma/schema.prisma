@@ -56,6 +56,9 @@ model Organization {
   members  OrganizationMember[]
   apiKeys  ApiKey[]
   clusters Cluster[]
+  agents   Agent[]
+  auditLogs AuditLog[]
+  requestLogs RequestLog[]
 
   @@index([slug])
   @@map("organizations")
@@ -111,12 +114,13 @@ model ApiKey {
   rateLimitReset DateTime @default(now()) // When counter resets
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  agents       Agent[]
 
   @@index([organizationId])
   @@index([keyPrefix]) // Performance optimization
   @@index([keyHash])
   @@index([expiresAt])
+  clusters   Cluster[] // Clusters registered with this key
+
   @@map("api_keys")
 }
 
@@ -129,11 +133,18 @@ model ApiKey {
 /// Each agent defines a Docker container image and how to run it.
 /// This is a one-time registration, then the agent can be executed many times.
 model Agent {
-  id          String   @id @default(uuid())
-  apiKeyId    String   // Which API key (customer) owns this agent
-  name        String   // Human-readable name like "complaint-analyzer"
-  image       String   // Docker image URL: docker.io/company/agent:v1
-  description String?  // Optional description for documentation
+  id             String   @id @default(uuid())
+  organizationId String   // Which organization owns this agent
+  name           String   // Human-readable name like "complaint-analyzer"
+  image          String   // Docker image URL: docker.io/company/agent:v1
+  description    String?  // Optional description for documentation
+  
+  // Canonical hash of config for upsert diffing
+  // Generated from: name + image + resources + retryPolicy
+  configHash     String   // SHA-256 hash of config for change detection
+  
+  // Registration status
+  status         AgentStatus @default(PENDING)
   
   // Resource requirements (stored as JSON for flexibility)
   // Example: {cpu: "2", memory: "4Gi", gpu: "1", timeout: "300s"}
@@ -155,12 +166,22 @@ model Agent {
   updatedAt DateTime @updatedAt
 
   // Relations
-  apiKey     ApiKey      @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
-  executions Execution[]
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  cluster      Cluster?     @relation(fields: [clusterId], references: [id])
+  clusterId    String?      // Optional pinning to specific cluster
+  executions   Execution[]
 
-  @@unique([apiKeyId, name]) // Agent names must be unique per customer
-  @@index([apiKeyId])        // Fast lookup of all agents for an API key
+  @@unique([organizationId, name]) // Agent names must be unique per organization
+  @@index([organizationId])        // Fast lookup of all agents for an organization
+  @@index([configHash])            // Fast lookup by config hash for upsert
   @@map("agents")
+}
+
+enum AgentStatus {
+  PENDING
+  ACTIVE
+  INACTIVE
+  FAILED
 }
 
 // ============================================================================
@@ -196,6 +217,11 @@ model Cluster {
   // In production, this is tracked in memory by the gRPC server
   streamId         String?   // Internal ID for the active gRPC stream
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  apiKey       ApiKey?      @relation(fields: [apiKeyId], references: [id])
+  apiKeyId     String?      // Which API Key registered this cluster
+
+  agents       Agent[]      // Agents pinned or assigned to this cluster
   executions   Execution[]
 
   // Relations to telemetry data
@@ -243,7 +269,8 @@ model Execution {
   clusterId String?  // Which cluster is running this execution (optional until selected)
   
   // Execution state machine
-  status    String   // pending, queued, running, completed, failed
+  status    ExecutionStatus @default(PENDING)
+  priority  Priority        @default(NORMAL)
   
   // Data flow
   input     Json     // Input data passed to agent (from SDK)
@@ -277,6 +304,22 @@ model Execution {
   @@index([status, createdAt])               // "Show me all pending executions"
   @@index([createdAt(sort: Desc)])           // "Show me recent executions" (global view)
   @@map("executions")
+}
+
+enum ExecutionStatus {
+  PENDING
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMED_OUT
+  CANCELLED
+}
+
+enum Priority {
+  HIGH
+  NORMAL
+  LOW
 }
 
 // ============================================================================
@@ -392,31 +435,7 @@ model Log {
   @@map("logs")
 }
 
-// ============================================================================
-// JOB QUEUE METADATA
-// ============================================================================
 
-/// BullMQ job metadata for tracking async operations
-/// Jobs are stored in Redis, this table tracks completion status
-model Job {
-  id          String    @id @default(uuid())
-  type        String    // Job type identifier
-  payload     Json      // Job parameters
-  status      JobStatus @default(PENDING)
-  attempts    Int       @default(0)
-  maxAttempts Int       @default(3)
-  error       String?
-  result      Json?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  startedAt   DateTime?
-  completedAt DateTime?
-
-  @@index([status])
-  @@index([type, status])
-  @@index([createdAt])
-  @@map("jobs")
-}
 
 /// Generic event log for cluster and system events
 model Event {
@@ -438,10 +457,53 @@ model Event {
   @@map("events")
 }
 
-enum JobStatus {
-  PENDING
-  RUNNING
-  COMPLETED
-  FAILED
-  RETRYING
+
+
+// ============================================================================
+// AUDIT & MONITORING
+// ============================================================================
+
+/// Audit log for administrative actions
+model AuditLog {
+  id             String   @id @default(uuid())
+  organizationId String
+  userId         String?
+  action         String   // e.g., "AGENT_CREATED", "API_KEY_ROTATED"
+  resourceType   String   // e.g., "Agent", "ApiKey"
+  resourceId     String
+  metadata       Json?    // Contextual data (diffs, etc.)
+  ipAddress      String?
+  userAgent      String?
+  timestamp      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, timestamp(sort: Desc)])
+  @@index([resourceType, resourceId])
+  @@map("audit_logs")
+}
+
+/// Detailed log of every API request for the "Timeline" UI
+model RequestLog {
+  id             String   @id @default(uuid())
+  organizationId String?
+  apiKeyId       String?
+  method         String   // GET, POST, etc.
+  path           String
+  statusCode     Int
+  durationMs     Int      // Process timing
+  ipAddress      String?
+  userAgent      String?
+  requestId      String   @unique // X-Request-ID
+  timestamp      DateTime @default(now())
+  
+  // Timing breakdown (JSON for flexibility)
+  // { auth: 2, db: 10, inngest: 5 }
+  timeline       Json?
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, timestamp(sort: Desc)])
+  @@index([requestId])
+  @@map("request_logs")
 }

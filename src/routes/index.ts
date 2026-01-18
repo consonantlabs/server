@@ -21,15 +21,14 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { authenticateApiKey } from '@/middleware/auth.middleware.js';
-import { authenticateJWT } from '@/middleware/jwt-auth.middleware.js';
-import { authRoutes } from './auth.route.js';
+import { authenticate } from '@/middleware/auth.middleware.js';
+import { authRoutes } from './auth.routes.js';
 // import { organizationRoutes } from './organizations.route.js';
 // import { dashboardRoutes } from './dashboard.route.js';
-import { apiKeyRoutes } from './api-keys.route.js';
-import { clusterRoutes } from './clusters.route.js';
-import { telemetryRoutes } from './telemetry.route.js';
-import { registerApiRoutes } from './sdk.js';
+import { apiKeyRoutes } from './auth-keys.routes.js';
+import { clusterRoutes } from './cluster.routes.js';
+import { telemetryRoutes } from './telemetry.routes.js';
+import { registerApiRoutes } from './sdk.routes.js';
 
 /**
  * Register all API v1 routes.
@@ -63,7 +62,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // Users manage their organizations and members
     await apiV1.register(async (orgScope) => {
       // Apply JWT authentication to all organization routes
-      orgScope.addHook('preHandler', authenticateJWT);
+      // Apply authentication (User/JWT preferred for Org Management)
+      orgScope.addHook('preHandler', authenticate);
 
       // await orgScope.register(organizationRoutes);
       // await orgScope.register(dashboardRoutes);
@@ -76,11 +76,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // API keys are scoped to organizations and used for programmatic access
     await apiV1.register(async (resourceScope) => {
       // Apply API key authentication to all resource routes
-      resourceScope.addHook('preHandler', authenticateApiKey);
+      resourceScope.addHook('preHandler', authenticate);
 
-      await resourceScope.register(apiKeyRoutes);
-      await resourceScope.register(clusterRoutes);
-      await resourceScope.register(telemetryRoutes);
+      // Register routes with organization prefix
+      await resourceScope.register(apiKeyRoutes, { prefix: '/organizations/:organizationId/api-keys' });
+      await resourceScope.register(clusterRoutes, { prefix: '/organizations/:organizationId/clusters' });
+      await resourceScope.register(telemetryRoutes, { prefix: '/organizations/:organizationId' });
     });
 
     apiV1.log.info('✓ API v1 routes registered');
@@ -91,7 +92,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // ========================================================================
   await app.register(async (sdkScope) => {
     // Apply API key authentication
-    sdkScope.addHook('preHandler', authenticateApiKey);
+    // Apply authentication
+    sdkScope.addHook('preHandler', authenticate);
 
     await sdkScope.register(registerApiRoutes);
   });

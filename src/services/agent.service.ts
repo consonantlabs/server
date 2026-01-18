@@ -10,41 +10,130 @@
  * The agent registry is consulted during execution to fetch the agent's
  * configuration (image URL, resources, retry policy). This happens on the
  * hot path, so queries are optimized with strategic indexes.
+ * 
+ * KEY FEATURES:
+ * - Canonical hashing for config diffing (upsert behavior)
+ * - Organization-scoped agents (not API key scoped)
+ * - Status tracking: pending → active → failed
  */
 
 import { PrismaClient, Agent, Prisma } from '@prisma/client';
+import { createHash } from 'crypto';
 import { logger } from '../utils/logger.js';
 import type { AgentConfig } from './inngest/events.js';
+
+// Agent status values are imported from @prisma/client
+import { AgentStatus } from '@prisma/client';
+
+/**
+ * Generate a canonical hash for an agent configuration.
+ * Used for detecting changes during upsert operations.
+ * 
+ * The hash is computed from a deterministic JSON representation of:
+ * - name, image, resources, retryPolicy
+ * 
+ * @param config - Agent configuration
+ * @returns SHA-256 hash string
+ */
+export function generateConfigHash(config: AgentConfig): string {
+  // Create a canonical representation for hashing
+  const canonical = {
+    name: config.name,
+    image: config.image,
+    resources: config.resources,
+    retryPolicy: config.retryPolicy,
+    useAgentSandbox: config.useAgentSandbox ?? false,
+    warmPoolSize: config.warmPoolSize ?? 0,
+    networkPolicy: config.networkPolicy ?? 'standard',
+  };
+
+  // Sort keys for deterministic JSON
+  const sortedJson = JSON.stringify(canonical, Object.keys(canonical).sort());
+
+  return createHash('sha256').update(sortedJson).digest('hex');
+}
 
 /**
  * Agent Registry Service
  * 
  * Provides type-safe operations for managing agent definitions.
- * All operations are scoped to an API key, ensuring customers can only
+ * All operations are scoped to an organization, ensuring customers can only
  * access their own agents.
  */
-export class AgentRegistryService {
-  constructor(private prisma: PrismaClient) {}
+export class AgentService {
+  constructor(private prisma: PrismaClient) { }
 
   /**
-   * Register a new agent.
+   * Register or update an agent.
    * 
-   * Creates an agent definition that can be executed multiple times.
-   * Agent names must be unique within an API key's namespace.
+   * Uses upsert semantics: creates the agent if it doesn't exist,
+   * updates it if the config has changed (detected via config hash).
    * 
-   * @param apiKeyId - Which API key owns this agent
+   * @param organizationId - Which organization owns this agent
    * @param config - Agent configuration
-   * @returns Created agent record
-   * @throws Error if agent name already exists for this API key
+   * @returns Object with agent record and whether it was created/updated
    */
-  async register(apiKeyId: string, config: AgentConfig): Promise<Agent> {
+  async registerOrUpdate(
+    organizationId: string,
+    config: AgentConfig
+  ): Promise<{ agent: Agent; action: 'created' | 'updated' | 'unchanged' }> {
     // Validate configuration before saving
     this.validateConfig(config);
 
+    const configHash = generateConfigHash(config);
+
     try {
-      const agent = await this.prisma.agent.create({
+      // Check if agent with this name exists
+      const existingAgent = await this.prisma.agent.findUnique({
+        where: {
+          organizationId_name: {
+            organizationId,
+            name: config.name,
+          },
+        },
+      });
+
+      if (existingAgent) {
+        // Agent exists - check if config changed
+        if (existingAgent.configHash === configHash) {
+          logger.debug({
+            agentId: existingAgent.id,
+            agentName: config.name,
+          }, 'Agent config unchanged, skipping update');
+
+          return { agent: existingAgent, action: 'unchanged' };
+        }
+
+        // Config changed - update the agent
+        const updatedAgent = await this.prisma.agent.update({
+          where: { id: existingAgent.id },
+          data: {
+            image: config.image,
+            description: config.description,
+            resources: config.resources as Prisma.InputJsonValue,
+            retryPolicy: config.retryPolicy as Prisma.InputJsonValue,
+            useAgentSandbox: config.useAgentSandbox ?? false,
+            warmPoolSize: config.warmPoolSize ?? 0,
+            networkPolicy: config.networkPolicy ?? 'standard',
+            environmentVariables: config.environmentVariables as Prisma.InputJsonValue,
+            configHash,
+            status: AgentStatus.PENDING, // Reset to pending for re-registration
+          },
+        });
+
+        logger.info({
+          agentId: updatedAgent.id,
+          agentName: config.name,
+          organizationId,
+        }, 'Agent updated with new config');
+
+        return { agent: updatedAgent, action: 'updated' };
+      }
+
+      // Create new agent
+      const newAgent = await this.prisma.agent.create({
         data: {
-          apiKeyId,
+          organizationId,
           name: config.name,
           image: config.image,
           description: config.description,
@@ -54,52 +143,61 @@ export class AgentRegistryService {
           warmPoolSize: config.warmPoolSize ?? 0,
           networkPolicy: config.networkPolicy ?? 'standard',
           environmentVariables: config.environmentVariables as Prisma.InputJsonValue,
+          configHash,
+          status: AgentStatus.PENDING,
         },
       });
 
       logger.info({
-        agentId: agent.id,
-        agentName: agent.name,
-        apiKeyId,
+        agentId: newAgent.id,
+        agentName: config.name,
+        organizationId,
       }, 'Agent registered');
 
-      return agent;
+      return { agent: newAgent, action: 'created' };
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        if (error.code === 'P2002') {
-          // Unique constraint violation - agent name already exists
-          throw new Error(`Agent with name "${config.name}" already exists`);
-        }
-      }
-      
       logger.error({
         error,
-        apiKeyId,
+        organizationId,
         agentName: config.name,
-      }, 'Failed to register agent');
-      
+      }, 'Failed to register/update agent');
+
       throw new Error(`Failed to register agent: ${error}`);
     }
+  }
+
+  /**
+   * Update agent status.
+   * Called when relayer acknowledges registration or reports failure.
+   * 
+   * @param agentId - Agent to update
+   * @param status - New status
+   */
+  async updateStatus(agentId: string, status: AgentStatus): Promise<Agent> {
+    return this.prisma.agent.update({
+      where: { id: agentId },
+      data: { status },
+    });
   }
 
   /**
    * Get an agent by name or ID.
    * 
    * This is called on the hot path during execution, so it's optimized
-   * with an index on (apiKeyId, name).
+   * with an index on (organizationId, name).
    * 
-   * @param apiKeyId - Which API key owns this agent
+   * @param organizationId - Which organization owns this agent
    * @param nameOrId - Agent name or UUID
    * @returns Agent if found, null otherwise
    */
-  async get(apiKeyId: string, nameOrId: string): Promise<Agent | null> {
+  async get(organizationId: string, nameOrId: string): Promise<Agent | null> {
     try {
       // Try to find by ID first (if it looks like a UUID)
       if (nameOrId.match(/^[0-9a-f-]{36}$/i)) {
         const agent = await this.prisma.agent.findFirst({
           where: {
             id: nameOrId,
-            apiKeyId,
+            organizationId,
           },
         });
         if (agent) return agent;
@@ -108,8 +206,8 @@ export class AgentRegistryService {
       // Fall back to name lookup (uses the unique index)
       return await this.prisma.agent.findUnique({
         where: {
-          apiKeyId_name: {
-            apiKeyId,
+          organizationId_name: {
+            organizationId,
             name: nameOrId,
           },
         },
@@ -117,7 +215,7 @@ export class AgentRegistryService {
     } catch (error) {
       logger.error({
         error,
-        apiKeyId,
+        organizationId,
         nameOrId,
       }, 'Failed to get agent');
       return null;
@@ -125,23 +223,23 @@ export class AgentRegistryService {
   }
 
   /**
-   * List all agents for an API key.
+   * List all agents for an organization.
    * 
    * Returns agents in reverse chronological order (newest first).
    * 
-   * @param apiKeyId - Which API key's agents to list
+   * @param organizationId - Which organization's agents to list
    * @param limit - Maximum number to return
    * @param offset - Skip this many agents (for pagination)
    * @returns Array of agents
    */
   async list(
-    apiKeyId: string,
+    organizationId: string,
     limit: number = 50,
     offset: number = 0
   ): Promise<Agent[]> {
     try {
       return await this.prisma.agent.findMany({
-        where: { apiKeyId },
+        where: { organizationId },
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
@@ -149,65 +247,9 @@ export class AgentRegistryService {
     } catch (error) {
       logger.error({
         error,
-        apiKeyId,
+        organizationId,
       }, 'Failed to list agents');
       return [];
-    }
-  }
-
-  /**
-   * Update an agent's configuration.
-   * 
-   * Allows changing resource requirements, retry policy, and advanced features.
-   * The agent image can also be updated (useful for deploying new versions).
-   * 
-   * @param apiKeyId - Which API key owns this agent
-   * @param agentId - Agent to update
-   * @param changes - Configuration changes
-   * @returns Updated agent
-   * @throws Error if agent not found or doesn't belong to this API key
-   */
-  async update(
-    apiKeyId: string,
-    agentId: string,
-    changes: Partial<AgentConfig>
-  ): Promise<Agent> {
-    // Verify ownership
-    const existing = await this.get(apiKeyId, agentId);
-    if (!existing) {
-      throw new Error('Agent not found or access denied');
-    }
-
-    try {
-      const agent = await this.prisma.agent.update({
-        where: { id: agentId },
-        data: {
-          ...(changes.name && { name: changes.name }),
-          ...(changes.image && { image: changes.image }),
-          ...(changes.description !== undefined && { description: changes.description }),
-          ...(changes.resources && { resources: changes.resources as Prisma.InputJsonValue }),
-          ...(changes.retryPolicy && { retryPolicy: changes.retryPolicy as Prisma.InputJsonValue }),
-          ...(changes.useAgentSandbox !== undefined && { useAgentSandbox: changes.useAgentSandbox }),
-          ...(changes.warmPoolSize !== undefined && { warmPoolSize: changes.warmPoolSize }),
-          ...(changes.networkPolicy && { networkPolicy: changes.networkPolicy }),
-          ...(changes.environmentVariables !== undefined && { 
-            environmentVariables: changes.environmentVariables as Prisma.InputJsonValue 
-          }),
-        },
-      });
-
-      logger.info({
-        agentId,
-        changes: Object.keys(changes),
-      }, 'Agent updated');
-
-      return agent;
-    } catch (error) {
-      logger.error({
-        error,
-        agentId,
-      }, 'Failed to update agent');
-      throw new Error(`Failed to update agent: ${error}`);
     }
   }
 
@@ -217,13 +259,13 @@ export class AgentRegistryService {
    * Cascades to delete all execution records for this agent.
    * This is a destructive operation and should be used carefully.
    * 
-   * @param apiKeyId - Which API key owns this agent
+   * @param organizationId - Which organization owns this agent
    * @param agentId - Agent to delete
-   * @throws Error if agent not found or doesn't belong to this API key
+   * @throws Error if agent not found or doesn't belong to this organization
    */
-  async delete(apiKeyId: string, agentId: string): Promise<void> {
+  async delete(organizationId: string, agentId: string): Promise<void> {
     // Verify ownership
-    const existing = await this.get(apiKeyId, agentId);
+    const existing = await this.get(organizationId, agentId);
     if (!existing) {
       throw new Error('Agent not found or access denied');
     }
@@ -311,27 +353,27 @@ export class AgentRegistryService {
  * Singleton instance of the agent registry service.
  * Initialized in server.ts with the Prisma client.
  */
-let agentRegistryInstance: AgentRegistryService | null = null;
+let agentServiceInstance: AgentService | null = null;
 
 /**
- * Initialize the agent registry service.
+ * Initialize the agent service.
  * 
  * @param prisma - Prisma client instance
  */
-export function initAgentRegistry(prisma: PrismaClient): void {
-  agentRegistryInstance = new AgentRegistryService(prisma);
-  logger.info('Agent registry service initialized');
+export function initAgentService(prisma: PrismaClient): void {
+  agentServiceInstance = new AgentService(prisma);
+  logger.info('Agent service initialized');
 }
 
 /**
- * Get the agent registry service instance.
+ * Get the agent service instance.
  * 
- * @returns AgentRegistryService instance
+ * @returns AgentService instance
  * @throws Error if not initialized
  */
-export function getAgentRegistry(): AgentRegistryService {
-  if (!agentRegistryInstance) {
-    throw new Error('Agent registry not initialized. Call initAgentRegistry() first.');
+export function getAgentService(): AgentService {
+  if (!agentServiceInstance) {
+    throw new Error('Agent service not initialized. Call initAgentService() first.');
   }
-  return agentRegistryInstance;
+  return agentServiceInstance;
 }

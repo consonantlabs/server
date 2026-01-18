@@ -26,7 +26,6 @@
 
 import { PrismaClient } from '@prisma/client';
 import { Mutex } from 'async-mutex';
-import { execSync } from 'child_process';
 import { createAdapter } from './adapter.js';
 import { connectWithRetry, disconnect } from './connection.js';
 import type { AppLogger } from './types.js';
@@ -37,6 +36,9 @@ import type { AppLogger } from './types.js';
 class PrismaManager {
   /** Singleton Prisma client instance (null until initialized) */
   private client: PrismaClient | null = null;
+
+  /** Telemetry Prisma client instance (TimescaleDB) */
+  private telemetryClient: PrismaClient | null = null;
 
   /** Current DATABASE_URL (stored at initialization, read-only) */
   private currentDatabaseUrl: string | null = null;
@@ -54,89 +56,60 @@ class PrismaManager {
   private logger: AppLogger | null = null;
 
   /**
-   * Initialize the Prisma client with the current DATABASE_URL.
-   * 
-   * IMPORTANT: This can only be called ONCE. Any DATABASE_URL change
-   * requires a full application restart.
-   * 
-   * What it does:
-   * 1. Auto-syncs schema provider from DATABASE_URL
-   * 2. Validates DATABASE_URL is set
-   * 3. Creates database adapter for detected provider
-   * 4. Creates Prisma client with adapter
-   * 5. Connects with retry logic
-   * 6. Stores client and URL in memory
-   * 7. Marks as initialized (immutable)
+   * Initialize the Prisma clients.
    * 
    * @param logger - Fastify logger instance (required)
-   * @param dbUrl - Optional database URL override (defaults to process.env.DATABASE_URL)
-   * @throws {Error} If DATABASE_URL is not set or connection fails
-   * @throws {Error} If already initialized
+   * @param dbUrl - Optional operational database URL override
+   * @param telemetryUrl - Optional telemetry database URL override
    */
-  async initialize(logger: AppLogger, dbUrl?: string): Promise<void> {
+  async initialize(logger: AppLogger, dbUrl?: string, telemetryUrl?: string): Promise<void> {
     return this.mutex.runExclusive(async () => {
       if (this.isInitialized) {
         logger.info('[Prisma Manager] Already initialized, skipping...');
         return;
       }
 
-      // Auto-sync schema provider based on DATABASE_URL
-      try {
-        logger.info('[Prisma Manager] Syncing schema provider...');
-        execSync('node prisma/sync-provider.js', {
-          cwd: process.cwd(),
-          stdio: 'inherit',
-        });
-      } catch (error) {
-        logger.warn('[Prisma Manager] Schema sync failed, continuing...');
-      }
-
-      // Validate DATABASE_URL exists
       const databaseUrl = dbUrl || process.env.DATABASE_URL;
+      const timeScaleUrl = telemetryUrl || process.env.TIMESCALE_DB_URL;
+
       if (!databaseUrl) {
-        throw new Error(
-          '[Prisma Manager] ❌ DATABASE_URL not set. Please set it before initializing.'
-        );
+        throw new Error('[Prisma Manager] DATABASE_URL not set');
       }
 
-      // Store logger for lifetime of manager
       this.logger = logger;
+      logger.info('[Prisma Manager] Initializing clients...');
 
-      logger.info('[Prisma Manager] Initializing client...');
-
-      // Create adapter for detected database provider
-      const adapter = createAdapter(logger, databaseUrl);
-
-      // Create Prisma client with adapter
-      const client = new PrismaClient({
-        adapter,
+      // 1. Initialize Operational Client
+      const operationalAdapter = createAdapter(logger, databaseUrl);
+      this.client = new PrismaClient({
+        adapter: operationalAdapter,
         log: [
           { level: 'query', emit: 'event' },
           { level: 'error', emit: 'event' },
           { level: 'warn', emit: 'event' },
         ],
       });
+      this.wireLogging(this.client, logger);
+      await connectWithRetry(this.client, logger);
+      this.currentDatabaseUrl = databaseUrl;
 
-      // Wire up Prisma logs to our logger
-      this.wireLogging(client, logger);
-
-      // Connect with retry logic
-      const result = await connectWithRetry(client, logger);
-
-      if (!result.success) {
-        await client.$disconnect();
-        throw new Error(
-          `[Prisma Manager] ❌ Failed to connect: ${result.error}`
-        );
+      // 2. Initialize Telemetry Client (if configured)
+      if (timeScaleUrl) {
+        logger.info('[Prisma Manager] Initializing telemetry client (TimescaleDB)...');
+        const telemetryAdapter = createAdapter(logger, timeScaleUrl);
+        this.telemetryClient = new PrismaClient({
+          adapter: telemetryAdapter,
+          log: [
+            { level: 'error', emit: 'event' },
+            { level: 'warn', emit: 'event' },
+          ],
+        });
+        this.wireLogging(this.telemetryClient, logger);
+        await connectWithRetry(this.telemetryClient, logger);
       }
 
-      // Store client and URL (immutable from this point)
-      this.client = client;
-      this.currentDatabaseUrl = databaseUrl;
       this.isInitialized = true;
-
       logger.info('[Prisma Manager] ✓ Initialized successfully');
-      logger.info('[Prisma Manager] Configuration is now immutable - restart required to change DATABASE_URL');
     });
   }
 
@@ -176,6 +149,22 @@ class PrismaManager {
     }
 
     return this.client;
+  }
+
+  /**
+   * Get the telemetry Prisma client instance (TimescaleDB).
+   * Falls back to the main client if TIMESCALE_DB_URL is not set.
+   * 
+   * @returns Telemetry Prisma client instance
+   */
+  async getTelemetryClient(): Promise<PrismaClient> {
+    if (!this.telemetryClient) {
+      // If telemetry client is not initialized, fall back to main client
+      // (Used when operational and telemetry share the same DB)
+      return this.getClient();
+    }
+
+    return this.telemetryClient;
   }
 
   /**

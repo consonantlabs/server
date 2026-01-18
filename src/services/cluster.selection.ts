@@ -50,7 +50,7 @@ export interface SelectionPreferences {
  * Chooses the optimal cluster for executing an agent based on
  * requirements, availability, and load distribution.
  */
-export class ClusterSelectionService {
+export class ClusterService {
   constructor(private prisma: PrismaClient) { }
 
   /**
@@ -63,32 +63,22 @@ export class ClusterSelectionService {
    * 4. Geographic preferences
    * 5. Load balancing across clusters
    * 
-   * @param apiKeyId - Which customer's clusters to consider
+   * @param organizationId - Which organization's clusters to consider
    * @param agentConfig - Agent's resource requirements
    * @param preferences - Optional selection preferences
    * @returns Selected cluster
    * @throws Error if no suitable cluster is available
    */
   async selectCluster(
-    apiKeyId: string,
+    organizationId: string,
     agentConfig: Partial<AgentConfig>,
     preferences?: SelectionPreferences
   ): Promise<Cluster> {
     try {
-      // First, get organization for this API key
-      const apiKey = await this.prisma.apiKey.findUnique({
-        where: { id: apiKeyId },
-        select: { organizationId: true },
-      });
-
-      if (!apiKey) {
-        throw new Error(`API key not found: ${apiKeyId}`);
-      }
-
       // Find candidate clusters in the organization
       const clusters = await this.prisma.cluster.findMany({
         where: {
-          organizationId: apiKey.organizationId,
+          organizationId,
           status: 'ACTIVE',
         },
       });
@@ -118,14 +108,14 @@ export class ClusterSelectionService {
         clusterId: selected.id,
         clusterName: selected.name,
         score: scored[0].score,
-        apiKeyId,
+        organizationId,
       }, 'Cluster selected for execution');
 
       return selected;
     } catch (error) {
       logger.error({
         error,
-        apiKeyId,
+        organizationId,
       }, 'Failed to select cluster');
       throw error;
     }
@@ -302,27 +292,27 @@ export class ClusterSelectionService {
 /**
  * Singleton instance of the cluster selection service.
  */
-let clusterSelectionInstance: ClusterSelectionService | null = null;
+let clusterServiceInstance: ClusterService | null = null;
 
 /**
- * Initialize the cluster selection service.
+ * Initialize the cluster service.
  * 
  * @param prisma - Prisma client instance
  */
-export function initClusterSelection(prisma: PrismaClient): void {
-  clusterSelectionInstance = new ClusterSelectionService(prisma);
-  logger.info('Cluster selection service initialized');
+export function initClusterService(prisma: PrismaClient): void {
+  clusterServiceInstance = new ClusterService(prisma);
+  logger.info('Cluster service initialized');
 }
 
 /**
- * Get the cluster selection service instance.
+ * Get the cluster service instance.
  * 
- * @returns ClusterSelectionService instance
+ * @returns ClusterService instance
  * @throws Error if not initialized
  */
-export function getClusterSelection(): ClusterSelectionService {
-  if (!clusterSelectionInstance) {
-    throw new Error('Cluster selection not initialized. Call initClusterSelection() first.');
+export function getClusterService(): ClusterService {
+  if (!clusterServiceInstance) {
+    throw new Error('Cluster service not initialized. Call initClusterService() first.');
   }
-  return clusterSelectionInstance;
+  return clusterServiceInstance;
 }

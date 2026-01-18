@@ -19,7 +19,7 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { hashSecret, verifySecret, generateSecureToken } from '@/utils/crypto.js';
+import { hashSecret, verifySecret } from '@/utils/crypto.js';
 import { logger } from '@/utils/logger.js';
 import { env } from '@/config/env.js';
 import jwt from 'jsonwebtoken';

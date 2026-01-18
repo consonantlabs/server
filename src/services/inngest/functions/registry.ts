@@ -30,6 +30,8 @@ import {
   executionFailureHandler,
 } from './execution-workflow.js';
 
+import { registrationWorkflow } from './registration-workflow.js';
+
 /**
  * Array of all Inngest functions.
  * 
@@ -58,6 +60,7 @@ export const allFunctions = [
   // Agent execution
   executionWorkflow,
   executionFailureHandler,
+  registrationWorkflow,
 ];
 
 /**

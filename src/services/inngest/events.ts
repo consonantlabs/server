@@ -101,14 +101,15 @@ export type ConsonantEvents = {
 
   /**
    * Triggered when a customer registers a new agent.
-   * This is a one-time setup event that stores the agent definition.
+   * Uses upsert semantics - may be create or update.
    */
   'agent.registered': {
     data: {
       agentId: string;
-      apiKeyId: string;     // Which customer owns this agent
+      organizationId: string;   // Which organization owns this agent
       config: AgentConfig;
-      createdAt: string;      // ISO 8601 timestamp
+      action: 'created' | 'updated' | 'unchanged';
+      createdAt: string;        // ISO 8601 timestamp
     };
   };
 
@@ -119,7 +120,7 @@ export type ConsonantEvents = {
   'agent.updated': {
     data: {
       agentId: string;
-      apiKeyId: string;
+      organizationId: string;
       changes: Partial<AgentConfig>;
       updatedAt: string;
     };
@@ -132,8 +133,40 @@ export type ConsonantEvents = {
   'agent.deleted': {
     data: {
       agentId: string;
-      apiKeyId: string;
+      organizationId: string;
       deletedAt: string;
+    };
+  };
+
+  // =========================================================================
+  // REGISTRATION FLOW EVENTS (ASYNC)
+  // =========================================================================
+
+  /**
+   * Triggered when API receives a registration request.
+   * This is the entry point for the async registration workflow.
+   */
+  'agent.registration.requested': {
+    data: {
+      organizationId: string;
+      config: AgentConfig; // Full config payload
+      requestId: string;   // For tracing
+      requestedAt: string;
+    };
+  };
+
+  /**
+   * Triggered when registration completes (success or failure).
+   * Used for webhooks or SDK polling.
+   */
+  'agent.registration.completed': {
+    data: {
+      agentId: string;
+      organizationId: string;
+      status: 'success' | 'failed';
+      action?: 'created' | 'updated' | 'unchanged';
+      error?: string;
+      completedAt: string;
     };
   };
 
@@ -152,10 +185,10 @@ export type ConsonantEvents = {
     data: {
       executionId: string;
       agentId: string;
-      apiKeyId: string;
+      organizationId: string;    // Which organization owns this agent
       input: AgentInput;
       priority: 'high' | 'normal' | 'low';
-      cluster?: string;       // Optional: specific cluster to use
+      cluster?: string;          // Optional: specific cluster to use
       requestedAt: string;
     };
   };

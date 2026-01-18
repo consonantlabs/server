@@ -40,11 +40,11 @@ async function prismaPlugin(app: FastifyInstance): Promise<void> {
   app.decorateRequest('prisma', { getter: () => client });
 
   // Track active requests for graceful shutdown
-  app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.addHook('onRequest', async (_request: FastifyRequest, _reply: FastifyReply) => {
     prismaManager.incrementActiveRequests();
   });
 
-  app.addHook('onResponse', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.addHook('onResponse', async (_request: FastifyRequest, _reply: FastifyReply) => {
     prismaManager.decrementActiveRequests();
   });
 

@@ -14,7 +14,7 @@ import {
   updateProfile,
   changePassword,
 } from '@/controllers/auth.controller.js';
-import { authenticateJWT } from '@/middleware/jwt-auth.middleware.js';
+import { authenticate } from '@/middleware/auth.middleware.js';
 
 /**
  * Register authentication routes with Fastify.
@@ -36,7 +36,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/auth/login', login);
 
   // Authenticated routes - require JWT token
-  app.get('/auth/me', { preHandler: authenticateJWT }, getCurrentUser as any);
-  app.patch('/auth/me', { preHandler: authenticateJWT }, updateProfile as any);
-  app.post('/auth/change-password', { preHandler: authenticateJWT }, changePassword as any);
+  app.get('/auth/me', { preHandler: authenticate }, getCurrentUser as any);
+  app.patch('/auth/me', { preHandler: authenticate }, updateProfile as any);
+  app.post('/auth/change-password', { preHandler: authenticate }, changePassword as any);
 }
