@@ -7,12 +7,12 @@ import { verifySecret } from '@/utils/crypto.js';
  * Authentication Interceptor
  * 
  * Validates cluster credentials from gRPC metadata.
- * Metadata keys: "cluster-id", "cluster-token", we use api-keys for now
+ * Metadata keys: "cluster-id", and "api-keys" 
  * 
  * Authentication Flow:
- * 1. Extract cluster-id and cluster-token from metadata
+ * 1. Extract cluster-id and api-key from metadata
  * 2. Query database for cluster with matching ID
- * 3. Compare provided token with stored token (secure hash comparison)
+ * 3. Compare provided api-key with stored api-key (secure hash comparison)
  * 4. Allow or deny based on validation result
  */
 export const authInterceptor: grpc.Interceptor = ((options: any, nextCall: any) => {
@@ -68,7 +68,7 @@ export const authInterceptor: grpc.Interceptor = ((options: any, nextCall: any) 
         if (!isRegistering) {
           const cluster = await prisma.cluster.findFirst({
             where: { id: clusterId, organizationId: validKey.organizationId },
-            select: { id: true, secretHash: true, status: true }
+            select: { id: true, status: true }
           });
 
           if (!cluster) {

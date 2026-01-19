@@ -300,7 +300,6 @@ export class ClusterService {
     name: string;
     relayerVersion?: string;
     capabilities?: any;
-    secretHash: string;
   }): Promise<Cluster> {
     return this.prisma.cluster.upsert({
       where: {
@@ -315,14 +314,12 @@ export class ClusterService {
         capabilities: data.capabilities ?? {},
         status: 'ACTIVE',
         apiKeyId: data.apiKeyId,
-        secretHash: data.secretHash,
       },
       create: {
         organizationId: data.organizationId,
         name: data.name,
         relayerVersion: data.relayerVersion,
         capabilities: data.capabilities ?? {},
-        secretHash: data.secretHash,
         status: 'ACTIVE',
         apiKeyId: data.apiKeyId,
       },

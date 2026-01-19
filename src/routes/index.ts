@@ -25,7 +25,7 @@ import { authenticate } from '@/middleware/auth.middleware.js';
 import { authRoutes } from './auth.routes.js';
 // import { organizationRoutes } from './organizations.route.js';
 // import { dashboardRoutes } from './dashboard.route.js';
-import { apiKeyRoutes } from './auth-keys.routes.js';
+import { apiKeyRoutes } from './api-keys.routes.js';
 import { clusterRoutes } from './cluster.routes.js';
 import { telemetryRoutes } from './telemetry.routes.js';
 import { registerApiRoutes } from './sdk.routes.js';

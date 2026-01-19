@@ -2,7 +2,6 @@ import { inngest } from '../client.js';
 import { getAgentService } from '../../agent.service.js';
 import { logger } from '../../../utils/logger.js';
 import { prismaManager } from '../../db/manager.js';
-import type { Agent } from '@prisma/client';
 import type { AgentConfig } from '../events.js';
 
 /**

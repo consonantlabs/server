@@ -16,7 +16,7 @@ import { fileURLToPath } from 'url';
 import { logger } from '../../utils/logger.js';
 import { prismaManager } from '../db/manager.js';
 import { getWorkQueue } from '../redis/work-queue.js';
-import { generateSecureToken, hashSecret, verifySecret } from '../../utils/crypto.js';
+import { verifySecret } from '../../utils/crypto.js';
 import { getConnectionManager } from './connection-manager.js';
 import { getEventHandler } from './handlers/event-handler.js';
 import { getClusterService } from '../cluster.service.js';
@@ -27,7 +27,7 @@ import { errorInterceptor } from './interceptors/error-interceptor.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Connection management is now handled by ConnectionManager singleton
+// Connection management is handled by ConnectionManager singleton
 
 /**
  * Load and compile the Protocol Buffer definitions.
@@ -99,11 +99,7 @@ async function registerCluster(
       });
     }
 
-    // 2. Generate secure cluster token (Used if we want multi-layer auth, 
-    // but per user request we primarily rely on API Key now. 
-    // We still store this for legacy compatibility or future use)
-    const clusterToken = generateSecureToken(32);
-    const secretHash = await hashSecret(clusterToken);
+ 
 
     // 3. Register/Update Cluster via Service
     const cluster = await clusterService.registerCluster({
@@ -112,7 +108,6 @@ async function registerCluster(
       name: cluster_name,
       relayerVersion: relayer_version,
       capabilities: capabilities ? JSON.parse(JSON.stringify(capabilities)) : {},
-      secretHash: secretHash,
     });
 
     logger.info({ clusterId: cluster.id }, 'Cluster registered successfully');
@@ -124,7 +119,6 @@ async function registerCluster(
       config_json: JSON.stringify({
         heartbeat_interval_ms: 30000,
         log_level: 'info',
-        cluster_token: clusterToken // Provided in case the relayer wants to use it
       }),
     });
   } catch (error) {

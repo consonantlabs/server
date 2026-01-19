@@ -11,7 +11,7 @@ import { verifySecret } from '../utils/crypto.js';
 import { logger } from '../utils/logger.js';
 
 /**
- * Legendary Passport.js Plugin
+ * Passport.js Plugin
  * 
  * Provides unified, extensible authentication for:
  * 1. User Sessions (JWT) - For human operators and dashboard access.
@@ -93,5 +93,5 @@ export default fp(async (fastify) => {
         return await prisma.user.findUnique({ where: { id } });
     });
 
-    logger.info('✓ Legendary Passport.js plugin initialized');
+    logger.info('✓ Passport.js plugin initialized');
 });

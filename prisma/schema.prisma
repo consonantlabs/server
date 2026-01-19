@@ -201,8 +201,7 @@ model Cluster {
   // Example: {kubernetes: {version: "1.28"}, resources: {totalCpu: "32", totalMemory: "128Gi"}}
   capabilities  Json
   
-  // Cluster secret for gRPC authentication (bcrypt hashed)
-  secretHash     String
+  
   
   status         ClusterStatus @default(PENDING)
   createdAt      DateTime      @default(now())
@@ -218,11 +217,12 @@ model Cluster {
   streamId         String?   // Internal ID for the active gRPC stream
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   
-  apiKey       ApiKey?      @relation(fields: [apiKeyId], references: [id])
-  apiKeyId     String?      // Which API Key registered this cluster
+ 
+  apiKeyId     String      // Which API Key registered this cluster
 
   agents       Agent[]      // Agents pinned or assigned to this cluster
   executions   Execution[]
+  apiKey       ApiKey      @relation(fields: [apiKeyId], references: [id])
 
   // Relations to telemetry data
   traces         Trace[]
