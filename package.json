@@ -1,6 +1,6 @@
 {
   "name": "@consonantlabs/control-plane",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Consonant Labs Control Plane - Production SaaS Infrastructure",
   "main": "dist/server.js",
   "type": "module",
