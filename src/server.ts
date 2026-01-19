@@ -114,18 +114,18 @@ async function initializeServices(app: FastifyInstance): Promise<void> {
   logger.info('✓ Redis connected');
 
   // 3. Initialize Work Queue
-  const { initWorkQueue } = await import('./services/redis/queue.js');
+  const { initWorkQueue } = await import('./services/redis/work-queue.js');
   initWorkQueue(redisClient.getClient());
   logger.info('✓ Work queue initialized');
 
   // 4. Initialize Agent Service
   const { initAgentService } = await import('./services/agent.service.js');
-  await initAgentService(await prismaManager.getClient());
+  initAgentService(await prismaManager.getClient());
   logger.info('✓ Agent service initialized');
 
   // 5. Initialize Cluster Service
-  const { initClusterService } = await import('./services/cluster.selection.js');
-  await initClusterService(await prismaManager.getClient());
+  const { initClusterService } = await import('./services/cluster.service.js');
+  initClusterService(await prismaManager.getClient());
   logger.info('✓ Cluster service initialized');
 
   // 6. Initialize API Key Service

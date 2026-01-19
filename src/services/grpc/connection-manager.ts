@@ -5,7 +5,7 @@ import { Redis } from 'ioredis';
 
 /**
  * ConnectionManager handles the lifecycle of gRPC bidirectional streams
- * between the control plane and relayers (Kubernetes clusters).
+ * between the control plane and relayers in (Kubernetes clusters).
  * 
  * SCALABILITY DESIGN:
  * In a multi-pod Control Plane, a relayer connects to a single pod.

@@ -1,8 +1,8 @@
 /**
  * @fileoverview Agent Registry Service
- * @module services/agent-registry
+ * @module services/agent
  * 
- * This service manages the agent registry - the catalog of agents that
+ * This service manages the registered agents - the catalog of agents that
  * customers have registered and can execute. Each agent defines a Docker
  * container image and execution configuration.
  * 

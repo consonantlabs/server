@@ -22,9 +22,9 @@ import { inngest } from '../client.js';
 import { logger } from '../../../utils/logger.js';
 import { prismaManager } from '../../db/manager.js';
 import { getAgentService } from '../../agent.service.js';
-import { getClusterService } from '../../cluster.selection.js';
-import { getWorkQueue } from '../../redis/queue.js';
-import type { WorkItem } from '../../redis/queue.js';
+import { getClusterService } from '../../cluster.service.js';
+import { getWorkQueue } from '../../redis/work-queue.js';
+import type { WorkItem } from '../../redis/work-queue.js';
 
 interface SimpleAgentRecord {
     id: string;

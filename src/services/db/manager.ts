@@ -136,7 +136,7 @@ class PrismaManager {
   /**
    * Get the current Prisma client instance.
    * 
-   * Usage: Call this in your routes/services whenever you need to access the database.
+   * Usage: Call this in your services whenever you need to access the database.
    * 
    * @returns Prisma client instance
    * @throws {Error} If manager is not initialized

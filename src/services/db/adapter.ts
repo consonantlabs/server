@@ -9,9 +9,7 @@
  * - Detects provider (postgresql, sqlite)
  * - Creates and returns the matching Prisma adapter
  * 
- * IMPORTANT: This enables multi-database support at runtime.
- * The schema.prisma file may have a static provider field, but Prisma
- * uses the adapter to determine actual database behavior.
+ * IMPORTANT: This enables multi-database support at runtime
  * 
  * BENEFITS:
  * - Works with static artifacts

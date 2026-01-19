@@ -1,6 +1,6 @@
 /**
  * @fileoverview Cluster Selection Service
- * @module services/cluster-selection
+ * @module services/cluster
  * 
  * This service implements the logic for choosing which Kubernetes cluster
  * should execute an agent. The selection considers resource requirements,
@@ -14,7 +14,7 @@
 
 import { PrismaClient, Cluster } from '@prisma/client';
 import { logger } from '../utils/logger.js';
-import { getWorkQueue } from './redis/queue.js';
+import { getWorkQueue } from './redis/work-queue.js';
 import type { AgentConfig } from './inngest/events.js';
 
 /**
@@ -254,12 +254,6 @@ export class ClusterService {
    * Returns a summary of all clusters showing their status and queue depth.
    * Useful for monitoring and debugging cluster selection.
    * 
-   * @param apiKeyId - Which customer's clusters to check
-   * @returns Array of cluster stats
-   */
-  /**
-   * Get statistics about cluster availability and load.
-   * 
    * @param organizationId - Which organization's clusters to check
    * @returns Array of cluster stats including queue depth and last heartbeat
    */
@@ -338,7 +332,7 @@ export class ClusterService {
   /**
    * Delete a cluster and close its active stream fleet-wide.
    * 
-   * This is a "brutal" cleanup operation that:
+   * WARNING: This is a "brutal" cleanup operation that:
    * 1. Signals all control plane pods to terminate the gRPC stream.
    * 2. Purges all pending work from the Redis queue.
    * 3. Removes the cluster record from the database.
@@ -354,7 +348,7 @@ export class ClusterService {
       await manager.unregisterStream(clusterId);
 
       // 2. Clear work queue (multi-tenant partitioned)
-      const { getWorkQueue } = await import('./redis/queue.js');
+      const { getWorkQueue } = await import('./redis/work-queue.js');
       await getWorkQueue().clearClusterQueue(organizationId, clusterId);
 
       // 3. Delete from DB

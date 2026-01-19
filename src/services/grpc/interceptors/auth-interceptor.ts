@@ -7,7 +7,7 @@ import { verifySecret } from '@/utils/crypto.js';
  * Authentication Interceptor
  * 
  * Validates cluster credentials from gRPC metadata.
- * Metadata keys: "cluster-id", "cluster-token"
+ * Metadata keys: "cluster-id", "cluster-token", we use api-keys for now
  * 
  * Authentication Flow:
  * 1. Extract cluster-id and cluster-token from metadata

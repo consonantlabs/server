@@ -15,11 +15,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from '../../utils/logger.js';
 import { prismaManager } from '../db/manager.js';
-import { getWorkQueue } from '../redis/queue.js';
+import { getWorkQueue } from '../redis/work-queue.js';
 import { generateSecureToken, hashSecret, verifySecret } from '../../utils/crypto.js';
 import { getConnectionManager } from './connection-manager.js';
 import { getEventHandler } from './handlers/event-handler.js';
-import { getClusterService } from '../cluster.selection.js';
+import { getClusterService } from '../cluster.service.js';
 import { authInterceptor } from './interceptors/auth-interceptor.js';
 import { loggingInterceptor } from './interceptors/logging-interceptor.js';
 import { errorInterceptor } from './interceptors/error-interceptor.js';
@@ -290,7 +290,7 @@ export async function startGrpcServer(port: number, redisUrl: string) {
       (err, port) => {
         if (err) return reject(err);
         logger.info({ port }, 'gRPC server bound');
-        server.start(); // This method is deprecated in newer versions but valid in @grpc/grpc-js 1.9
+        // server.start(); // This method is deprecated in newer versions but valid in @grpc/grpc-js 1.9
         // server.start() is not needed in newest grpc-js, plain bindAsync is enough? 
         // Docs say: server.start() is required.
         resolve();

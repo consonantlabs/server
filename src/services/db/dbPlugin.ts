@@ -1,9 +1,14 @@
-// src/db/dbPlugin.ts
+/**
+ * @fileoverview Database fastify plugin
+ * @module services/db/dbPlugin
+ * 
+ */
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
 import fp from 'fastify-plugin';
 import { PrismaClient } from '@prisma/client';
 import { detectProvider } from './config.js';
 import { prismaManager } from './manager.js';
+
 
 /**
  * Extend Fastify types to include prisma on request object.
