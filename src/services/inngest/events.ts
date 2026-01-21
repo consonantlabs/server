@@ -26,6 +26,7 @@ import { EventSchemas } from 'inngest';
 export interface AgentConfig {
   name: string;
   image: string;
+  cluster: string;       // Targeted cluster name
   description?: string;
   resources: {
     cpu: string;        // e.g., "2" or "2000m"
@@ -149,7 +150,7 @@ export type ConsonantEvents = {
   'agent.registration.requested': {
     data: {
       organizationId: string;
-      config: AgentConfig; // Full config payload
+      config: AgentConfig; // Full config payload containing the 'cluster' name
       requestId: string;   // For tracing
       requestedAt: string;
     };
@@ -167,6 +168,19 @@ export type ConsonantEvents = {
       action?: 'created' | 'updated' | 'unchanged';
       error?: string;
       completedAt: string;
+    };
+  };
+
+  /**
+   * Triggered when a relayer reports registration status for an agent.
+   */
+  'agent.registration.status_updated': {
+    data: {
+      agentId: string;
+      clusterId: string;
+      status: 'ACTIVE' | 'FAILED';
+      error?: string;
+      timestamp: string;
     };
   };
 
@@ -258,7 +272,9 @@ export type ConsonantEvents = {
     data: {
       executionId: string;
       agentId: string;
+      organizationId: string;
       clusterId: string;
+      status: string;    // Raw status from relayer
       result: AgentOutput;
       durationMs: number;
       resourceUsage: ResourceUsage;
@@ -274,7 +290,9 @@ export type ConsonantEvents = {
     data: {
       executionId: string;
       agentId: string;
+      organizationId: string;
       clusterId: string;
+      status: string;    // Raw status from relayer
       error: {
         code: string;         // e.g., "TIMEOUT", "OOM_KILLED", "EXIT_CODE_1"
         message: string;

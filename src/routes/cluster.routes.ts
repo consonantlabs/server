@@ -1,21 +1,21 @@
 import type { FastifyInstance } from 'fastify';
-import { registerCluster } from '../controllers/clusters.controller.js';
+import {
+  registerCluster,
+  listClusters,
+  getCluster,
+  deleteCluster
+} from '../controllers/clusters.controller.js';
 
 export async function clusterRoutes(app: FastifyInstance) {
-  app.post(
-    '/',
-    {
-      schema: {
-        body: {
-          type: 'object',
-          required: ['name', 'namespace'],
-          properties: {
-            name: { type: 'string' },
-            namespace: { type: 'string' },
-          },
-        },
-      },
-    },
-    registerCluster
-  );
+  // POST / - Register a new cluster
+  app.post('/', registerCluster);
+
+  // GET / - List all clusters
+  app.get('/', listClusters);
+
+  // GET /:clusterId - Get cluster details
+  app.get('/:clusterId', getCluster);
+
+  // DELETE /:clusterId - Delete a cluster
+  app.delete('/:clusterId', deleteCluster);
 }

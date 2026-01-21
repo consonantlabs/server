@@ -25,8 +25,16 @@ import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentation
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 // @ts-ignore
 import * as resources from '@opentelemetry/resources';
-import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
-// @ts-ignore
+// ARCHITECTURAL DESIGN: Semantic Conventions
+// In modern OTEL, resource attributes are moving towards a unified 'ATTR_' prefix.
+// We use the stable identifiers for service name/version and literal strings for 
+// incubating attributes to guarantee future compatibility and avoid deprecation warnings.
+import {
+  ATTR_SERVICE_NAME,
+  ATTR_SERVICE_VERSION,
+} from '@opentelemetry/semantic-conventions';
+
+const ATTR_DEPLOYMENT_ENVIRONMENT = 'deployment.environment';
 import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { env } from '@/config/env.js';
 import { OTEL } from '@/config/constants.js';
@@ -56,11 +64,14 @@ export function initializeOpenTelemetry(): NodeSDK | null {
     });
 
     // Create resource attributes
+    // ARCHITECTURAL DESIGN: Resource Attribution
+    // We use standard semantic conventions to ensure compatibility with
+    // OTLP-compliant backends like Jaeger, Tempo, and Honeycomb.
     const resource = resources.Resource.default().merge(
       new resources.Resource({
-        [SemanticResourceAttributes.SERVICE_NAME]: env.OTEL_SERVICE_NAME,
-        [SemanticResourceAttributes.SERVICE_VERSION]: env.OTEL_SERVICE_VERSION,
-        [SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]: env.OTEL_ENVIRONMENT,
+        [ATTR_SERVICE_NAME]: env.OTEL_SERVICE_NAME,
+        [ATTR_SERVICE_VERSION]: env.OTEL_SERVICE_VERSION,
+        [ATTR_DEPLOYMENT_ENVIRONMENT]: env.OTEL_ENVIRONMENT,
       })
     );
 

@@ -105,15 +105,16 @@ export class EventHandler {
     if (logEntries.length === 0) return;
 
     try {
-      const prisma = await prismaManager.getClient();
-      const execution = await prisma.execution.findUnique({
+      const timescale = await prismaManager.getTelemetryClient();
+
+      const execution = await (await prismaManager.getClient()).execution.findUnique({
         where: { id: executionId },
         select: { agent: { select: { organizationId: true } } }
       });
 
       if (!execution) return;
 
-      await prisma.log.createMany({
+      await (timescale as any).log.createMany({
         data: logEntries.map((log: any) => ({
           organizationId: execution.agent.organizationId,
           executionId,
@@ -147,15 +148,16 @@ export class EventHandler {
     if (metricPoints.length === 0) return;
 
     try {
-      const prisma = await prismaManager.getClient();
-      const execution = await prisma.execution.findUnique({
+      const timescale = await prismaManager.getTelemetryClient();
+
+      const execution = await (await prismaManager.getClient()).execution.findUnique({
         where: { id: executionId },
         select: { agent: { select: { organizationId: true } } }
       });
 
       if (!execution) return;
 
-      await prisma.metric.createMany({
+      await (timescale as any).metric.createMany({
         data: metricPoints.map((m: any) => ({
           organizationId: execution.agent.organizationId,
           executionId,
@@ -170,6 +172,34 @@ export class EventHandler {
       });
     } catch (err) {
       logger.error({ err, executionId, clusterId }, 'Failed to handle metric batch');
+    }
+  }
+
+  /**
+   * Handle registration status updates from relayer.
+   * Reported after relayer attempts to pull image and prepare sandbox.
+   */
+  async handleRegistrationStatus(clusterId: string, status: any): Promise<void> {
+    const agentId = status.agent_id;
+    const registrationStatus = status.status === 'REGISTRATION_SUCCESS' ? 'ACTIVE' : 'FAILED';
+    const error = status.error_message;
+
+    logger.info({ clusterId, agentId, status: registrationStatus }, 'Processing agent registration status update');
+
+    try {
+      const { getAgentService } = await import('../../agent.service.js');
+      const agentService = getAgentService();
+
+      await agentService.handleRegistrationStatus(
+        agentId,
+        clusterId,
+        registrationStatus as any,
+        error
+      );
+
+      logger.info({ agentId, clusterId, status: registrationStatus }, 'Agent registration status updated successfully');
+    } catch (err) {
+      logger.error({ err, agentId, clusterId }, 'Failed to handle registration status update');
     }
   }
 
@@ -191,15 +221,16 @@ export class EventHandler {
     if (spans.length === 0) return;
 
     try {
-      const prisma = await prismaManager.getClient();
-      const execution = await prisma.execution.findUnique({
+      const timescale = await prismaManager.getTelemetryClient();
+
+      const execution = await (await prismaManager.getClient()).execution.findUnique({
         where: { id: executionId },
         select: { agent: { select: { organizationId: true } } }
       });
 
       if (!execution) return;
 
-      await prisma.trace.createMany({
+      await (timescale as any).trace.createMany({
         data: spans.map((s: any) => ({
           organizationId: execution.agent.organizationId,
           executionId,

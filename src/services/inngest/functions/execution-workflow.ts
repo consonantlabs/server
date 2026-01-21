@@ -24,7 +24,6 @@ import { prismaManager } from '../../db/manager.js';
 import { getAgentService } from '../../agent.service.js';
 import { getClusterService } from '../../cluster.service.js';
 import { getWorkQueue } from '../../redis/work-queue.js';
-import type { WorkItem } from '../../redis/work-queue.js';
 
 interface SimpleAgentRecord {
     id: string;
@@ -73,57 +72,14 @@ export const executionWorkflow = inngest.createFunction(
         }, 'Execution workflow started');
 
         // =====================================================================
-        // STEP 1: CREATE EXECUTION RECORD (DB)
-        // =====================================================================
-        await step.run('create-execution-db', async () => {
-            const prisma = await prismaManager.getClient();
-            const agentService = getAgentService();
-
-            // 1. Validate Agent exists and is active
-            const agent = await agentService.get(organizationId, agentId);
-            if (!agent) throw new Error(`Agent ${agentId} not found`);
-            if (agent.status !== 'ACTIVE') throw new Error(`Agent ${agent.name} is not active`);
-
-            // 2. Create Execution (Upsert for idempotency)
-            const execution = await prisma.execution.upsert({
-                where: { id: executionId },
-                update: {}, // No-op if exists
-                create: {
-                    id: executionId,
-                    agentId: agent.id,
-                    status: 'PENDING',
-                    input: input as any, // Cast generic object to JsonValue
-                    priority: priority?.toUpperCase() as any || 'NORMAL',
-                    maxAttempts: (agent.retryPolicy as any)?.maxAttempts || 3,
-                },
-            });
-
-            // 3. Log Audit Record
-            await prisma.auditLog.create({
-                data: {
-                    organizationId,
-                    action: 'EXECUTION_TRIGGERED',
-                    resourceType: 'Execution',
-                    resourceId: executionId,
-                    metadata: {
-                        agentId: agent.id,
-                        agentName: agent.name,
-                        priority
-                    },
-                }
-            });
-
-            return execution;
-        });
-
-        // =====================================================================
-        // STEP 2: GET AGENT CONFIG
+        // STEP 1: GET AGENT CONFIG
         // =====================================================================
         const agent = await step.run('get-agent-config', async (): Promise<SimpleAgentRecord> => {
             const agentService = getAgentService();
             const agentRecord = await agentService.get(organizationId, agentId);
-            // We know it exists from Step 1, but type safety needs it
+
             if (!agentRecord) throw new Error(`Agent ${agentId} not found`);
+            if (agentRecord.status !== 'ACTIVE') throw new Error(`Agent ${agentRecord.name} is not active`);
 
             return {
                 id: agentRecord.id,
@@ -155,33 +111,21 @@ export const executionWorkflow = inngest.createFunction(
                     },
                 });
 
-                if (cluster) {
-                    logger.info({ executionId, clusterId: cluster.id }, 'Using preferred cluster');
-                    return cluster;
-                }
-                logger.warn({ executionId, preferredCluster }, 'Preferred cluster not available');
+                if (cluster) return cluster;
             }
 
             // Auto-select best cluster
-            const cluster = await clusterService.selectCluster(
+            return await clusterService.selectCluster(
                 organizationId,
                 {
-                    resources: agent.resources,
+                    resources: agent.resources as any,
                     useAgentSandbox: agent.useAgentSandbox,
                 },
                 {
-                    requireGpu: !!agent.resources.gpu,
+                    requireGpu: !!(agent.resources as any)?.gpu,
                     requireSandbox: agent.useAgentSandbox,
                 }
             );
-
-            logger.info({
-                executionId,
-                clusterId: cluster.id,
-                clusterName: cluster.name,
-            }, 'Cluster selected');
-
-            return cluster;
         });
 
         // =====================================================================
@@ -201,48 +145,21 @@ export const executionWorkflow = inngest.createFunction(
                 },
             });
 
-            // Build work item for relayer
-            const workItem: WorkItem = {
+            // Build lean work item for the relayer
+            const workItem = {
                 executionId,
-                agentId: agent.id,
                 agentName: agent.name,
-                agentImage: agent.image,
                 input: input as any,
-                resources: {
-                    cpu: agent.resources.cpu,
-                    memory: agent.resources.memory,
-                    gpu: agent.resources.gpu,
-                    timeout: agent.resources.timeout,
-                },
-                retryPolicy: {
-                    maxAttempts: agent.retryPolicy.maxAttempts,
-                    backoff: agent.retryPolicy.backoff,
-                    initialDelay: agent.retryPolicy.initialDelay,
-                },
-                useAgentSandbox: agent.useAgentSandbox,
-                warmPoolSize: agent.warmPoolSize,
-                networkPolicy: agent.networkPolicy,
-                environmentVariables: agent.environmentVariables,
+                priority: priority as any || 'normal'
             };
 
-            // Queue to Redis with partitioning
+            // Queue to Redis as a WORK message
             await workQueue.enqueue(
                 organizationId,
                 selectedCluster.id,
-                workItem,
+                { type: 'WORK', data: workItem as any },
                 priority as any || 'normal'
             );
-
-            // Emit queued event
-            await inngest.send({
-                name: 'agent.execution.queued',
-                data: {
-                    executionId,
-                    agentId: agent.id,
-                    clusterId: selectedCluster.id,
-                    queuedAt: new Date().toISOString(),
-                },
-            });
 
             logger.info({
                 executionId,
@@ -253,7 +170,7 @@ export const executionWorkflow = inngest.createFunction(
         // =====================================================================
         // STEP 4: WAIT FOR COMPLETION (up to timeout)
         // =====================================================================
-        const timeoutMs = parseTimeout(agent.resources.timeout) + 60000; // Add 1min buffer
+        const timeoutMs = parseTimeout((agent.resources as any)?.timeout || '300s') + 60000; // Add 1min buffer
 
         const completionEvent = await step.waitForEvent('wait-for-completion', {
             event: 'agent.execution.completed',
@@ -299,6 +216,14 @@ export const executionWorkflow = inngest.createFunction(
         // =====================================================================
         await step.run('handle-timeout', async () => {
             const prisma = await prismaManager.getClient();
+
+            // Fetch current status - if already completed or failed via event handler, skip
+            const current = await prisma.execution.findUnique({
+                where: { id: executionId },
+                select: { status: true }
+            });
+
+            if (current?.status === 'COMPLETED' || current?.status === 'FAILED') return;
 
             await prisma.execution.update({
                 where: { id: executionId },

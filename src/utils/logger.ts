@@ -50,21 +50,21 @@ export const logger = pino({
   mixin() {
     const context = contextManager.getAllContext();
 
-    // Outside request context (startup, background jobs, etc.)
+    // Base bindings always include at least an empty traceId for the formatter
+    const bindings: Record<string, string> = {
+      traceId: context?.traceId || '',
+    };
+
     if (!context) {
-      return {};
+      return bindings;
     }
 
-    // Inject context into every log entry
-    return {
-      traceId: context.traceId,
-      spanId: context.spanId,
-      parentSpanId: context.parentSpanId,
-      requestId: context.requestId,
-      organizationId: context.organizationId,
-      clusterId: context.clusterId,
-      userId: context.userId,
-    };
+    if (context.requestId) bindings.requestId = context.requestId;
+    if (context.organizationId) bindings.organizationId = context.organizationId;
+    if (context.clusterId) bindings.clusterId = context.clusterId;
+    if (context.userId) bindings.userId = context.userId;
+
+    return bindings;
   },
 
   /**
@@ -103,9 +103,13 @@ export const logger = pino({
       options: {
         colorize: true,
         translateTime: 'HH:MM:ss.l',
-        ignore: 'pid,hostname',
+        ignore: 'pid,hostname,service,environment,version,traceId', // Clean up dev logs
         singleLine: false,
-        messageFormat: '{levelLabel} [{traceId}] {msg}',
+        /**
+         * Robust message formatting for development.
+         * Uses traceId if present, otherwise just the message.
+         */
+        messageFormat: '[{traceId}] {msg}',
       },
     }
     : undefined,

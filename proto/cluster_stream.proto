@@ -39,7 +39,26 @@ message RelayerMessage {
     LogBatch log_batch = 3;
     TraceBatch trace_batch = 4;
     MetricBatch metric_batch = 5;
+    AgentRegistrationStatus agent_registration_status = 6;
   }
+}
+
+// Status update for an agent registration
+message AgentRegistrationStatus {
+  string agent_id = 1;
+  string cluster_id = 2;
+  
+  enum RegistrationStatus {
+    REGISTRATION_UNKNOWN = 0;
+    REGISTRATION_PENDING = 1;
+    REGISTRATION_SUCCESS = 2;
+    REGISTRATION_FAILED = 3;
+    REGISTRATION_DELETED = 4;
+  }
+  
+  RegistrationStatus status = 3;
+  string error_message = 4;
+  int64 timestamp = 5;
 }
 
 // Heartbeat sent periodically to prove relayer is alive
@@ -175,34 +194,52 @@ message MetricPoint {
 message ControlPlaneMessage {
   oneof message {
     WorkItem work_item = 1;
-    ConfigurationUpdate config_update = 2;
-    ControlCommand control_command = 3;
+    AgentRegistration agent_registration = 2;
+    ConfigurationUpdate config_update = 3;
+    ControlCommand control_command = 4;
   }
 }
 
-// Work item - instructions to execute an agent
+// Work item - instructions to execute a previously registered agent
+// ARCHITECTURAL DESIGN: Thin WorkItem
+// We only pass the identity and input. All configuration policies 
+// (sandbox, resources, etc.) are already known by the relayer via registration.
 message WorkItem {
   string execution_id = 1;
-  string agent_id = 2;
-  string agent_name = 3;
-  string agent_image = 4;
+  string agent_name = 2;
   
   // Agent input as JSON string
-  string input_json = 5;
+  string input_json = 3;
+  
+  Priority priority = 4;
+}
+
+// Agent Registration - signals the relayer to prepare an agent image/sandbox
+// ARCHITECTURAL DESIGN: Fat Registration
+// This signal carries the full policy set needed to prepare the edge environment.
+message AgentRegistration {
+  string name = 1;         // Agent name (human-readable ID)
+  string image = 2;        // Docker image URL
   
   // Resource requirements
-  ResourceRequirements resources = 6;
+  ResourceRequirements resources = 3;
   
   // Retry policy
-  RetryPolicy retry_policy = 7;
+  RetryPolicy retry_policy = 4;
   
   // Advanced features
-  bool use_agent_sandbox = 8;
-  int32 warm_pool_size = 9;
-  string network_policy = 10;  // restricted, standard, unrestricted
+  bool use_agent_sandbox = 5;
+  int32 warm_pool_size = 6;
+  string network_policy = 7; // restricted, standard, unrestricted
   
   // Environment variables as JSON object
-  string environment_variables_json = 11;
+  string environment_variables_json = 8;
+  
+  // Optional configuration hash for drift detection
+  string config_hash = 9;
+  
+  // Internal control plane ID for tracking
+  string id = 10;
 }
 
 message ResourceRequirements {

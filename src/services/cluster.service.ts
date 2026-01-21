@@ -55,197 +55,14 @@ export class ClusterService {
 
   /**
    * Select the best cluster for an execution.
-   * 
-   * The selection algorithm considers:
-   * 1. Resource requirements (CPU, memory, GPU)
-   * 2. Cluster connectivity (must be connected)
-   * 3. Current queue depth (prefer less loaded clusters)
-   * 4. Geographic preferences
-   * 5. Load balancing across clusters
-   * 
-   * @param organizationId - Which organization's clusters to consider
-   * @param agentConfig - Agent's resource requirements
-   * @param preferences - Optional selection preferences
-   * @returns Selected cluster
-   * @throws Error if no suitable cluster is available
    */
   async selectCluster(
     organizationId: string,
     agentConfig: Partial<AgentConfig>,
     preferences?: SelectionPreferences
   ): Promise<Cluster> {
-    try {
-      // Find candidate clusters in the organization
-      const clusters = await this.prisma.cluster.findMany({
-        where: {
-          organizationId,
-          status: 'ACTIVE',
-        },
-      });
-
-      if (clusters.length === 0) {
-        throw new Error('No connected clusters available. Please connect a cluster or use hosted execution.');
-      }
-
-      // Filter clusters by requirements
-      const eligible = this.filterEligibleClusters(
-        clusters,
-        agentConfig,
-        preferences
-      );
-
-      if (eligible.length === 0) {
-        throw new Error('No clusters meet the resource requirements for this agent.');
-      }
-
-      // Score and rank eligible clusters
-      const scored = await this.scoreClusters(eligible, preferences);
-
-      // Select the highest-scored cluster
-      const selected = scored[0].cluster;
-
-      logger.info({
-        clusterId: selected.id,
-        clusterName: selected.name,
-        score: scored[0].score,
-        organizationId,
-      }, 'Cluster selected for execution');
-
-      return selected;
-    } catch (error) {
-      logger.error({
-        error,
-        organizationId,
-      }, 'Failed to select cluster');
-      throw error;
-    }
-  }
-
-  /**
-   * Filter clusters to only those that meet the agent's requirements.
-   * 
-   * Eliminates clusters that don't have necessary resources or capabilities.
-   * 
-   * @param clusters - All available clusters
-   * @param agentConfig - Agent's requirements
-   * @param preferences - Optional preferences
-   * @returns Filtered list of eligible clusters
-   */
-  private filterEligibleClusters(
-    clusters: Cluster[],
-    agentConfig: Partial<AgentConfig>,
-    preferences?: SelectionPreferences
-  ): Cluster[] {
-    return clusters.filter(cluster => {
-      const capabilities = cluster.capabilities as any as ClusterCapabilities;
-
-      // Check GPU requirement
-      if (preferences?.requireGpu || agentConfig.resources?.gpu) {
-        if (capabilities.resources.gpuNodes === 0) {
-          logger.debug({
-            clusterId: cluster.id,
-            reason: 'no_gpu_nodes',
-          }, 'Cluster filtered out');
-          return false;
-        }
-      }
-
-      // Check Agent Sandbox requirement
-      if (preferences?.requireSandbox || agentConfig.useAgentSandbox) {
-        // Check if cluster has Agent Sandbox installed
-        // This is indicated by the cluster's capabilities during registration
-        const hasAgentSandbox = (capabilities as any).features?.agentSandbox === true;
-
-        if (!hasAgentSandbox) {
-          logger.debug({
-            clusterId: cluster.id,
-            reason: 'no_agent_sandbox',
-          }, 'Cluster filtered out');
-          return false;
-        }
-      }
-
-      // Check region preference
-      if (preferences?.preferredRegion) {
-        if (capabilities.region !== preferences.preferredRegion) {
-          // Don't filter out, but this will affect scoring
-        }
-      }
-
-      // Cluster is eligible
-      return true;
-    });
-  }
-
-  /**
-   * Score clusters based on multiple factors.
-   * 
-   * Returns clusters in descending score order (best first).
-   * Scoring factors:
-   * - Current queue depth (lower is better)
-   * - Last heartbeat recency (more recent is better)
-   * - Region match (matching preferred region is better)
-   * - Round-robin to balance load
-   * 
-   * @param clusters - Eligible clusters to score
-   * @param preferences - Optional preferences
-   * @returns Array of scored clusters, sorted by score descending
-   */
-  private async scoreClusters(
-    clusters: Cluster[],
-    preferences?: SelectionPreferences
-  ): Promise<Array<{ cluster: Cluster; score: number }>> {
-    const workQueue = getWorkQueue();
-    const scored: Array<{ cluster: Cluster; score: number }> = [];
-
-    for (const cluster of clusters) {
-      let score = 100; // Start with base score
-
-      // Factor 1: Queue depth (heavily weighted)
-      // Prefer clusters with shorter queues
-      const queueLength = await workQueue.getQueueLength(cluster.organizationId, cluster.id);
-      const queuePenalty = Math.min(queueLength * 5, 50); // Cap at 50 points
-      score -= queuePenalty;
-
-      // Factor 2: Heartbeat recency (indicates cluster health)
-      const lastHeartbeat = cluster.lastHeartbeat ? new Date(cluster.lastHeartbeat).getTime() : 0;
-      const heartbeatAge = Date.now() - lastHeartbeat;
-      const ageMinutes = heartbeatAge / (1000 * 60);
-      if (ageMinutes > 5) {
-        // Penalize clusters that haven't sent heartbeat recently
-        score -= Math.min(ageMinutes * 2, 20);
-      } else if (lastHeartbeat === 0) {
-        // No heartbeat recorded yet - slight penalty
-        score -= 10;
-      }
-
-      // Factor 3: Region preference
-      if (preferences?.preferredRegion) {
-        const capabilities = cluster.capabilities as any as ClusterCapabilities;
-        if (capabilities.region === preferences.preferredRegion) {
-          score += 20; // Bonus for region match
-        }
-      }
-
-      // Factor 4: Random jitter for load balancing
-      // When scores are close, this provides natural load distribution
-      score += Math.random() * 10;
-
-      scored.push({ cluster, score });
-    }
-
-    // Sort by score descending
-    scored.sort((a, b) => b.score - a.score);
-
-    logger.debug({
-      scores: scored.map(s => ({
-        clusterId: s.cluster.id,
-        clusterName: s.cluster.name,
-        score: s.score.toFixed(2),
-      })),
-    }, 'Cluster scores calculated');
-
-    return scored;
+    const { selectOptimalCluster } = await import('./cluster/selection.js');
+    return selectOptimalCluster(this.prisma, organizationId, agentConfig, preferences);
   }
 
   /**
@@ -289,10 +106,15 @@ export class ClusterService {
   }
   /**
    * Register or update a cluster.
-   * Uses an upsert operation to handle both initial registration and subsequent metadata updates.
+   * 
+   * NEW ARCHITECTURE (2-Phase Auth):
+   * 1. Relayer calls with API Key.
+   * 2. Server generates a new Cluster Secret.
+   * 3. Server returns plaintext secret (one-time).
+   * 4. Relayer stores secret and uses it for all subsequent gRPC calls.
    * 
    * @param data - Cluster registration details
-   * @returns The registered cluster record
+   * @returns The registered cluster record and the plaintext secret
    */
   async registerCluster(data: {
     organizationId: string;
@@ -300,8 +122,14 @@ export class ClusterService {
     name: string;
     relayerVersion?: string;
     capabilities?: any;
-  }): Promise<Cluster> {
-    return this.prisma.cluster.upsert({
+  }): Promise<{ cluster: Cluster; clusterSecret: string }> {
+    const { generateSecureToken, hashSecret } = await import('../utils/crypto.js');
+
+    // Generate a new secure cluster secret
+    const clusterSecret = generateSecureToken(32);
+    const secretHash = await hashSecret(clusterSecret);
+
+    const cluster = await this.prisma.cluster.upsert({
       where: {
         organizationId_name: {
           organizationId: data.organizationId,
@@ -314,6 +142,7 @@ export class ClusterService {
         capabilities: data.capabilities ?? {},
         status: 'ACTIVE',
         apiKeyId: data.apiKeyId,
+        secretHash, // Rotate secret on every registration for extra security
       },
       create: {
         organizationId: data.organizationId,
@@ -322,20 +151,55 @@ export class ClusterService {
         capabilities: data.capabilities ?? {},
         status: 'ACTIVE',
         apiKeyId: data.apiKeyId,
+        secretHash,
+      },
+    });
+
+    return { cluster, clusterSecret };
+  }
+
+  /**
+   * List all clusters for an organization.
+   */
+  async listClusters(organizationId: string) {
+    return this.prisma.cluster.findMany({
+      where: { organizationId },
+      select: {
+        id: true,
+        name: true,
+        namespace: true,
+        status: true,
+        lastHeartbeat: true,
+        relayerVersion: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  /**
+   * Get a specific cluster.
+   */
+  async getCluster(organizationId: string, clusterId: string) {
+    return this.prisma.cluster.findFirst({
+      where: { id: clusterId, organizationId },
+      select: {
+        id: true,
+        name: true,
+        namespace: true,
+        status: true,
+        lastHeartbeat: true,
+        relayerVersion: true,
+        relayerConfig: true,
+        createdAt: true,
+        updatedAt: true,
       },
     });
   }
 
   /**
    * Delete a cluster and close its active stream fleet-wide.
-   * 
-   * WARNING: This is a "brutal" cleanup operation that:
-   * 1. Signals all control plane pods to terminate the gRPC stream.
-   * 2. Purges all pending work from the Redis queue.
-   * 3. Removes the cluster record from the database.
-   * 
-   * @param organizationId - Owning organization
-   * @param clusterId - Cluster to delete
    */
   async deleteCluster(organizationId: string, clusterId: string): Promise<void> {
     try {
@@ -362,9 +226,6 @@ export class ClusterService {
 
   /**
    * Update cluster heartbeat and status.
-   * 
-   * @param clusterId - Cluster to update
-   * @param statusText - New status string (defaults to ACTIVE)
    */
   async updateHeartbeat(clusterId: string, statusText: string = 'ACTIVE'): Promise<void> {
     await this.prisma.cluster.update({
@@ -374,6 +235,18 @@ export class ClusterService {
         status: statusText as any
       }
     });
+  }
+
+  /**
+   * Get single cluster statistics (Optimized).
+   */
+  async getSingleClusterStats(organizationId: string, clusterId: string) {
+    const { getWorkQueue } = await import('./redis/work-queue.js');
+    const queueLength = await getWorkQueue().getQueueLength(organizationId, clusterId);
+
+    return {
+      queueLength,
+    };
   }
 }
 

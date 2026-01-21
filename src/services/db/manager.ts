@@ -31,6 +31,16 @@ import { connectWithRetry, disconnect } from './connection.js';
 import type { AppLogger } from './types.js';
 
 /**
+ * Initialization options for PrismaManager
+ */
+interface PrismaManagerInitOptions {
+  /** Operational database URL */
+  databaseUrl?: string;
+  /** Telemetry database URL (TimescaleDB) */
+  timescaleUrl?: string;
+}
+
+/**
  * Prisma client manager singleton.
  */
 class PrismaManager {
@@ -42,6 +52,9 @@ class PrismaManager {
 
   /** Current DATABASE_URL (stored at initialization, read-only) */
   private currentDatabaseUrl: string | null = null;
+
+  /** Current TIMESCALE_DB_URL (stored at initialization, read-only) */
+  private currentTimescaleUrl: string | null = null;
 
   /** Mutex for thread-safe operations */
   private mutex = new Mutex();
@@ -59,18 +72,20 @@ class PrismaManager {
    * Initialize the Prisma clients.
    * 
    * @param logger - Fastify logger instance (required)
-   * @param dbUrl - Optional operational database URL override
-   * @param telemetryUrl - Optional telemetry database URL override
+   * @param options - Initialization options
    */
-  async initialize(logger: AppLogger, dbUrl?: string, telemetryUrl?: string): Promise<void> {
+  async initialize(
+    logger: AppLogger, 
+    options: PrismaManagerInitOptions = {}
+  ): Promise<void> {
     return this.mutex.runExclusive(async () => {
       if (this.isInitialized) {
         logger.info('[Prisma Manager] Already initialized, skipping...');
         return;
       }
 
-      const databaseUrl = dbUrl || process.env.DATABASE_URL;
-      const timeScaleUrl = telemetryUrl || process.env.TIMESCALE_DB_URL;
+      const databaseUrl = options.databaseUrl || process.env.DATABASE_URL;
+      const timescaleUrl = options.timescaleUrl || process.env.TIMESCALE_DB_URL;
 
       if (!databaseUrl) {
         throw new Error('[Prisma Manager] DATABASE_URL not set');
@@ -80,6 +95,7 @@ class PrismaManager {
       logger.info('[Prisma Manager] Initializing clients...');
 
       // 1. Initialize Operational Client
+      logger.info('[Prisma Manager] Initializing operational database client...');
       const operationalAdapter = createAdapter(logger, databaseUrl);
       this.client = new PrismaClient({
         adapter: operationalAdapter,
@@ -89,14 +105,15 @@ class PrismaManager {
           { level: 'warn', emit: 'event' },
         ],
       });
-      this.wireLogging(this.client, logger);
+      this.wireLogging(this.client, logger, 'Operational');
       await connectWithRetry(this.client, logger);
       this.currentDatabaseUrl = databaseUrl;
+      logger.info('[Prisma Manager] ✓ Operational database connected');
 
       // 2. Initialize Telemetry Client (if configured)
-      if (timeScaleUrl) {
+      if (timescaleUrl) {
         logger.info('[Prisma Manager] Initializing telemetry client (TimescaleDB)...');
-        const telemetryAdapter = createAdapter(logger, timeScaleUrl);
+        const telemetryAdapter = createAdapter(logger, timescaleUrl);
         this.telemetryClient = new PrismaClient({
           adapter: telemetryAdapter,
           log: [
@@ -104,12 +121,16 @@ class PrismaManager {
             { level: 'warn', emit: 'event' },
           ],
         });
-        this.wireLogging(this.telemetryClient, logger);
+        this.wireLogging(this.telemetryClient, logger, 'Telemetry');
         await connectWithRetry(this.telemetryClient, logger);
+        this.currentTimescaleUrl = timescaleUrl;
+        logger.info('[Prisma Manager] ✓ TimescaleDB connected');
+      } else {
+        logger.info('[Prisma Manager] ⚠ TIMESCALE_DB_URL not set, telemetry will use operational DB');
       }
 
       this.isInitialized = true;
-      logger.info('[Prisma Manager] ✓ Initialized successfully');
+      logger.info('[Prisma Manager] ✓ All clients initialized successfully');
     });
   }
 
@@ -118,18 +139,23 @@ class PrismaManager {
    * 
    * @param client - Prisma client instance
    * @param logger - Application logger
+   * @param prefix - Log prefix to identify which client
    */
-  private wireLogging(client: PrismaClient, logger: AppLogger): void {
+  private wireLogging(
+    client: PrismaClient, 
+    logger: AppLogger, 
+    prefix: string
+  ): void {
     client.$on('query' as never, (e: any) => {
-      logger.debug(`[Prisma] Query: ${e.query} (${e.duration}ms)`);
+      logger.debug(`[Prisma:${prefix}] Query: ${e.query} (${e.duration}ms)`);
     });
 
     client.$on('error' as never, (e: any) => {
-      logger.error(`[Prisma] Error: ${e.message}`);
+      logger.error(`[Prisma:${prefix}] Error: ${e.message}`);
     });
 
     client.$on('warn' as never, (e: any) => {
-      logger.warn(`[Prisma] Warning: ${e.message}`);
+      logger.warn(`[Prisma:${prefix}] Warning: ${e.message}`);
     });
   }
 
@@ -161,10 +187,22 @@ class PrismaManager {
     if (!this.telemetryClient) {
       // If telemetry client is not initialized, fall back to main client
       // (Used when operational and telemetry share the same DB)
+      this.logger?.debug(
+        '[Prisma Manager] Telemetry client not configured, using operational client'
+      );
       return this.getClient();
     }
 
     return this.telemetryClient;
+  }
+
+  /**
+   * Check if TimescaleDB is configured separately.
+   * 
+   * @returns True if telemetry uses a separate database
+   */
+  hasSeparateTelemetryDB(): boolean {
+    return this.telemetryClient !== null;
   }
 
   /**
@@ -174,6 +212,15 @@ class PrismaManager {
    */
   getCurrentDatabaseUrl(): string | null {
     return this.currentDatabaseUrl;
+  }
+
+  /**
+   * Get current TimescaleDB URL (read-only).
+   * 
+   * @returns Current TIMESCALE_DB_URL or null if not configured
+   */
+  getCurrentTimescaleUrl(): string | null {
+    return this.currentTimescaleUrl;
   }
 
   /**
@@ -213,13 +260,13 @@ class PrismaManager {
   }
 
   /**
-   * Gracefully disconnect client and reset state.
+   * Gracefully disconnect all clients and reset state.
    * 
    * Called during shutdown (SIGTERM/SIGINT) by the server.
    * 
    * What it does:
    * 1. Waits for active requests to complete (up to 10s)
-   * 2. Disconnects Prisma client
+   * 2. Disconnects both operational and telemetry clients
    * 3. Resets all internal state
    * 4. Marks as uninitialized
    * 
@@ -228,24 +275,35 @@ class PrismaManager {
   async disconnect(): Promise<void> {
     return this.mutex.runExclusive(async () => {
       if (!this.client) {
-        this.logger?.info('[Prisma Manager] No client to disconnect');
+        this.logger?.info('[Prisma Manager] No clients to disconnect');
         return;
       }
 
-      this.logger?.info('[Prisma Manager] Disconnecting client...');
+      this.logger?.info('[Prisma Manager] Starting graceful disconnect...');
 
       // Wait for active requests to complete
       await this.waitForActiveRequests();
 
-      // Disconnect client
+      // Disconnect operational client
+      this.logger?.info('[Prisma Manager] Disconnecting operational database...');
       await disconnect(this.client, this.logger!);
+      this.logger?.info('[Prisma Manager] ✓ Operational database disconnected');
+
+      // Disconnect telemetry client if it exists
+      if (this.telemetryClient) {
+        this.logger?.info('[Prisma Manager] Disconnecting TimescaleDB...');
+        await disconnect(this.telemetryClient, this.logger!);
+        this.logger?.info('[Prisma Manager] ✓ TimescaleDB disconnected');
+      }
 
       // Reset state
       this.client = null;
+      this.telemetryClient = null;
       this.currentDatabaseUrl = null;
+      this.currentTimescaleUrl = null;
       this.isInitialized = false;
 
-      this.logger?.info('[Prisma Manager] ✓ Disconnected successfully');
+      this.logger?.info('[Prisma Manager] ✓ All clients disconnected successfully');
     });
   }
 

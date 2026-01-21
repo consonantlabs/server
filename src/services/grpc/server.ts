@@ -79,7 +79,8 @@ async function registerCluster(
   try {
     const prisma = await prismaManager.getClient();
     // 1. Authenticate API key (Brutal re-verification for high security)
-    const keyPrefix = apiKey.substring(0, 8);
+    // 1. Authenticate API key
+    const keyPrefix = apiKey.substring(3, 11);
     const apiKeys = await prisma.apiKey.findMany({
       where: { keyPrefix, revokedAt: null }
     });
@@ -99,10 +100,10 @@ async function registerCluster(
       });
     }
 
- 
+
 
     // 3. Register/Update Cluster via Service
-    const cluster = await clusterService.registerCluster({
+    const { cluster, clusterSecret } = await clusterService.registerCluster({
       organizationId: validKey.organizationId,
       apiKeyId: validKey.id,
       name: cluster_name,
@@ -115,10 +116,11 @@ async function registerCluster(
     callback(null, {
       success: true,
       cluster_id: cluster.id,
-      message: 'Registration successful',
+      message: 'Registration successful. STORE THIS SECRET - it is only shown once.',
       config_json: JSON.stringify({
         heartbeat_interval_ms: 30000,
         log_level: 'info',
+        cluster_secret: clusterSecret, // The one-time plaintext secret
       }),
     });
   } catch (error) {
@@ -195,6 +197,8 @@ async function streamWork(call: grpc.ServerDuplexStream<any, any>) {
         await getEventHandler().handleMetricBatch(clusterId, message.metric_batch);
       } else if (message.trace_batch) {
         await getEventHandler().handleTraceBatch(clusterId, message.trace_batch);
+      } else if (message.agent_registration_status) {
+        await getEventHandler().handleRegistrationStatus(clusterId, message.agent_registration_status);
       }
     } catch (err) {
       logger.error({ err, clusterId }, 'Error processing stream message');
@@ -211,32 +215,44 @@ async function streamWork(call: grpc.ServerDuplexStream<any, any>) {
     await connectionManager.unregisterStream(clusterId);
   });
 
-  // Work Pusher - Using a more efficient approach
-  // In Phase 2, we should move this to an event-driven listener on the ConnectionManager
-  // but for immediate stability we keep a clean loop here.
+  /**
+   * ARCHITECTURAL DESIGN: Queue Message Mapping
+   * We pull unified QueueMessages from Redis and map them to specific 
+   * gRPC fields in the ControlPlaneMessage union.
+   */
   const pushWork = async () => {
     if (!connectionManager.isConnected(clusterId)) return;
 
     try {
-      // Dequeue with partitioning
-      const workItem = await workQueue.dequeue(organizationId, clusterId, 5);
+      const message = await workQueue.dequeue(organizationId, clusterId, 5);
 
-      if (workItem && connectionManager.isConnected(clusterId)) {
-        await connectionManager.sendToCluster(clusterId, {
-          work_item: {
-            execution_id: workItem.executionId,
-            agent_id: workItem.agentId,
-            agent_name: workItem.agentName,
-            agent_image: workItem.agentImage,
-            input_json: JSON.stringify(workItem.input),
-            resources: workItem.resources,
-            retry_policy: workItem.retryPolicy,
-            use_agent_sandbox: workItem.useAgentSandbox,
-            warm_pool_size: workItem.warmPoolSize,
-            network_policy: workItem.networkPolicy,
-            environment_variables_json: JSON.stringify(workItem.environmentVariables || {})
-          }
-        });
+      if (message && connectionManager.isConnected(clusterId)) {
+        if (message.type === 'WORK') {
+          await connectionManager.sendToCluster(clusterId, {
+            work_item: {
+              execution_id: message.data.executionId,
+              agent_name: message.data.agentName,
+              input_json: JSON.stringify(message.data.input),
+              // Map to proto Priority enum if needed
+              priority: message.data.priority === 'high' ? 1 : 2,
+            }
+          });
+        } else if (message.type === 'REGISTRATION') {
+          await connectionManager.sendToCluster(clusterId, {
+            agent_registration: {
+              name: message.data.agentName,
+              image: message.data.image,
+              resources: message.data.resources,
+              retry_policy: message.data.retryPolicy,
+              use_agent_sandbox: message.data.useAgentSandbox,
+              warm_pool_size: message.data.warmPoolSize,
+              network_policy: message.data.networkPolicy,
+              environment_variables_json: JSON.stringify(message.data.environmentVariables || {}),
+              config_hash: message.data.configHash,
+              id: message.data.agentId,
+            }
+          });
+        }
 
         // Recurse to check for more work immediately
         setImmediate(pushWork);
@@ -245,7 +261,7 @@ async function streamWork(call: grpc.ServerDuplexStream<any, any>) {
         setTimeout(pushWork, 100);
       }
     } catch (err) {
-      logger.error({ err, clusterId }, 'Work pusher error');
+      logger.error({ err, clusterId }, 'Queue pusher error');
       setTimeout(pushWork, 1000);
     }
   };
@@ -257,6 +273,10 @@ async function streamWork(call: grpc.ServerDuplexStream<any, any>) {
 
 /**
  * Start the gRPC server.
+ * 
+ * ARCHITECTURAL DESIGN: Non-Blocking Initialization
+ * We use bindAsync which is the modern, non-blocking way to start the gRPC
+ * server. server.start() is deprecated in newer @grpc/grpc-js versions.
  */
 export async function startGrpcServer(port: number, redisUrl: string) {
   const connectionManager = getConnectionManager();
@@ -280,13 +300,13 @@ export async function startGrpcServer(port: number, redisUrl: string) {
   return new Promise<void>((resolve, reject) => {
     server.bindAsync(
       `0.0.0.0:${port}`,
-      grpc.ServerCredentials.createInsecure(), // Use TLS in prod
+      grpc.ServerCredentials.createInsecure(), // TLS termination handled by LB
       (err, port) => {
-        if (err) return reject(err);
-        logger.info({ port }, 'gRPC server bound');
-        // server.start(); // This method is deprecated in newer versions but valid in @grpc/grpc-js 1.9
-        // server.start() is not needed in newest grpc-js, plain bindAsync is enough? 
-        // Docs say: server.start() is required.
+        if (err) {
+          logger.error({ err }, 'Failed to bind gRPC server');
+          return reject(err);
+        }
+        logger.info({ port }, '✓ gRPC server listening');
         resolve();
       }
     );

@@ -30,8 +30,13 @@ import {
   executionFailureHandler,
 } from './execution-workflow.js';
 
+import {
+  agentRegisteredAuditLog,
+  executionRequestedAuditLog,
+  executionCompletedAuditLog,
+} from './audit-listeners.js';
+
 import { registrationWorkflow } from './registration-workflow.js';
-import { bulkRegistrationWorkflow } from './bulk-registration-workflow.js';
 
 /**
  * Array of all Inngest functions.
@@ -46,7 +51,6 @@ export const allFunctions = [
   processTelemetryTraceBatch,
   processTelemetryMetricBatch,
   processTelemetryLogBatch,
-
   // Cluster lifecycle
   handleClusterConnected,
   handleClusterDisconnected,
@@ -62,7 +66,11 @@ export const allFunctions = [
   executionWorkflow,
   executionFailureHandler,
   registrationWorkflow,
-  bulkRegistrationWorkflow,
+
+  // Audit and Side Effects
+  agentRegisteredAuditLog,
+  executionRequestedAuditLog,
+  executionCompletedAuditLog,
 ];
 
 /**

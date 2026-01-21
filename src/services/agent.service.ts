@@ -17,13 +17,22 @@
  * - Status tracking: pending → active → failed
  */
 
-import { PrismaClient, Agent, Prisma } from '@prisma/client';
+import { PrismaClient, Agent, Prisma, Execution } from '@prisma/client';
 import { createHash } from 'crypto';
 import { logger } from '../utils/logger.js';
 import type { AgentConfig } from './inngest/events.js';
+import { inngest } from './inngest/client.js';
+import { generateUUID } from '../utils/crypto.js';
 
 // Agent status values are imported from @prisma/client
 import { AgentStatus } from '@prisma/client';
+
+export interface ExecutionRequest {
+  agentId: string;
+  organizationId: string;
+  input: Record<string, unknown>;
+  priority?: 'low' | 'normal' | 'high';
+}
 
 /**
  * Generate a canonical hash for an agent configuration.
@@ -64,129 +73,200 @@ export class AgentService {
   constructor(private prisma: PrismaClient) { }
 
   /**
-   * Register or update an agent.
+   * Register or update multiple agents in a single operation.
+   * This is the unified entry point for all agent registrations.
    * 
-   * Uses upsert semantics: creates the agent if it doesn't exist,
-   * updates it if the config has changed (detected via config hash).
-   * 
-   * @param organizationId - Which organization owns this agent
-   * @param config - Agent configuration
-   * @returns Object with agent record and whether it was created/updated
+   * @param organizationId - Owning organization
+   * @param configs - Array of agent configurations
+   * @returns Array of registration results
    */
-  async registerOrUpdate(
+  async registerAgents(
+    organizationId: string,
+    configs: AgentConfig[]
+  ): Promise<Array<{ name: string; status: 'success' | 'failed'; agentId?: string; error?: string }>> {
+    logger.info({ organizationId, count: configs.length }, 'Starting agent registration batch');
+
+    // Process in parallel for performance.
+    // The underlying private `registerOrUpdate` handles individual agent logic.
+    const tasks = configs.map(async (config) => {
+      try {
+        // Validate configuration before saving
+        this.validateConfig(config);
+
+        const { agent, action } = await this.upsertAgent(organizationId, config);
+
+        // Emit event to Inngest for registration workflow (unless unchanged)
+        // ARCHITECTURAL DESIGN: Durable Registration
+        // We use Inngest to handle the heavy lifting (Sandboxing, preparation)
+        // asynchronously after the DB record is secured.
+        if (action !== 'unchanged') {
+          await inngest.send({
+            name: 'agent.registration.requested',
+            data: {
+              organizationId,
+              config: config as any,
+              requestId: `reg-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+              requestedAt: new Date().toISOString(),
+            },
+          });
+        }
+
+        return {
+          name: config.name,
+          status: 'success' as const,
+          agentId: agent.id
+        };
+      } catch (error: any) {
+        logger.error({ error, organizationId, name: config.name }, 'Individual agent registration failed in batch');
+        return {
+          name: config.name,
+          status: 'failed' as const,
+          error: error.message
+        };
+      }
+    });
+
+    return Promise.all(tasks);
+  }
+
+  /**
+   * Internal: Register or update a single agent in the database.
+   * 
+   * @param organizationId - Owning organization
+   * @param config - Agent configuration
+   * @returns The agent record and the action taken
+   */
+  async upsertAgent(
     organizationId: string,
     config: AgentConfig
   ): Promise<{ agent: Agent; action: 'created' | 'updated' | 'unchanged' }> {
-    // Validate configuration before saving
-    this.validateConfig(config);
-
     const configHash = generateConfigHash(config);
 
     try {
-      // Check if agent with this name exists
+      // 1. Check if agent exists
       const existingAgent = await this.prisma.agent.findUnique({
         where: {
-          organizationId_name: {
-            organizationId,
-            name: config.name,
-          },
+          organizationId_name: { organizationId, name: config.name },
         },
       });
 
-      if (existingAgent) {
-        // Agent exists - check if config changed
-        if (existingAgent.configHash === configHash) {
-          logger.debug({
-            agentId: existingAgent.id,
-            agentName: config.name,
-          }, 'Agent config unchanged, skipping update');
-
-          return { agent: existingAgent, action: 'unchanged' };
-        }
-
-        // Config changed - update the agent
-        const updatedAgent = await this.prisma.agent.update({
-          where: { id: existingAgent.id },
+      // 2. Handle creation/update based on hash
+      if (!existingAgent) {
+        const agent = await this.prisma.agent.create({
           data: {
+            organizationId,
+            name: config.name,
             image: config.image,
             description: config.description,
+            configHash,
             resources: config.resources as Prisma.InputJsonValue,
             retryPolicy: config.retryPolicy as Prisma.InputJsonValue,
             useAgentSandbox: config.useAgentSandbox ?? false,
             warmPoolSize: config.warmPoolSize ?? 0,
             networkPolicy: config.networkPolicy ?? 'standard',
-            environmentVariables: config.environmentVariables as Prisma.InputJsonValue,
-            configHash,
-            status: AgentStatus.PENDING, // Reset to pending for re-registration
+            environmentVariables: config.environmentVariables as Prisma.InputJsonValue || {},
+            status: AgentStatus.PENDING,
           },
         });
 
-        logger.info({
-          agentId: updatedAgent.id,
-          agentName: config.name,
-          organizationId,
-        }, 'Agent updated with new config');
-
-        return { agent: updatedAgent, action: 'updated' };
+        logger.info({ organizationId, agentName: config.name, agentId: agent.id }, 'Agent created');
+        return { agent, action: 'created' };
       }
 
-      // Create new agent
-      const newAgent = await this.prisma.agent.create({
-        data: {
-          organizationId,
-          name: config.name,
-          image: config.image,
-          description: config.description,
-          resources: config.resources as Prisma.InputJsonValue,
-          retryPolicy: config.retryPolicy as Prisma.InputJsonValue,
-          useAgentSandbox: config.useAgentSandbox ?? false,
-          warmPoolSize: config.warmPoolSize ?? 0,
-          networkPolicy: config.networkPolicy ?? 'standard',
-          environmentVariables: config.environmentVariables as Prisma.InputJsonValue,
-          configHash,
-          status: AgentStatus.PENDING,
-        },
-      });
+      if (existingAgent.configHash !== configHash) {
+        const agent = await this.prisma.agent.update({
+          where: { id: existingAgent.id },
+          data: {
+            image: config.image,
+            description: config.description,
+            configHash,
+            resources: config.resources as Prisma.InputJsonValue,
+            retryPolicy: config.retryPolicy as Prisma.InputJsonValue,
+            useAgentSandbox: config.useAgentSandbox ?? false,
+            warmPoolSize: config.warmPoolSize ?? 0,
+            networkPolicy: config.networkPolicy ?? 'standard',
+            environmentVariables: config.environmentVariables as Prisma.InputJsonValue || {},
+            status: AgentStatus.PENDING,
+            registrationReport: Prisma.DbNull,
+          },
+        });
 
-      logger.info({
-        agentId: newAgent.id,
-        agentName: config.name,
-        organizationId,
-      }, 'Agent registered');
+        logger.info({ organizationId, agentName: config.name, agentId: agent.id }, 'Agent updated');
+        return { agent, action: 'updated' };
+      }
 
-      return { agent: newAgent, action: 'created' };
+      return { agent: existingAgent, action: 'unchanged' };
     } catch (error) {
-      logger.error({
-        error,
-        organizationId,
-        agentName: config.name,
-      }, 'Failed to register/update agent');
-
-      throw new Error(`Failed to register agent: ${error}`);
+      logger.error({ error, organizationId, name: config.name }, 'Failed to register/update agent in DB');
+      throw error;
     }
   }
 
   /**
-   * Register or update a list of agents.
+   * Handle registration status update from relayer.
+   * Called by the gRPC EventHandler when the relayer provides feedback on agent provisioning.
    * 
-   * Useful for bulk onboarding or syncing agent catalogs from CI/CD.
-   * 
-   * @param organizationId - Which organization owns these agents
-   * @param configs - Array of agent configurations
-   * @returns Array of registration results
+   * This is idempotent: it only updates if the status is actually changing or providing new info.
    */
-  async bulkRegisterOrUpdate(
-    organizationId: string,
-    configs: AgentConfig[]
-  ): Promise<Array<{ agent: Agent; action: 'created' | 'updated' | 'unchanged' }>> {
-    const results = [];
-    
-    for (const config of configs) {
-      const result = await this.registerOrUpdate(organizationId, config);
-      results.push(result);
+  async handleRegistrationStatus(
+    agentId: string,
+    clusterId: string,
+    status: AgentStatus,
+    error?: string
+  ): Promise<void> {
+    await this.prisma.agentClusterStatus.upsert({
+      where: {
+        agentId_clusterId: { agentId, clusterId }
+      },
+      update: { status, error, updatedAt: new Date() },
+      create: { agentId, clusterId, status, error }
+    });
+
+    // ARCHITECTURAL DESIGN: Global Status Aggregation
+    // If targeted cluster fails, the global status reflects it.
+    await this.aggregateGlobalStatus(agentId);
+
+    // Emit event to Inngest to notify any waiters or update frontend
+    await inngest.send({
+      name: 'agent.registration.status_updated',
+      data: {
+        agentId,
+        clusterId,
+        status: status as any,
+        error,
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+
+  /**
+   * Aggregate statuses from all clusters to form a global agent status.
+   */
+  private async aggregateGlobalStatus(agentId: string): Promise<void> {
+    const statuses = await this.prisma.agentClusterStatus.findMany({
+      where: { agentId }
+    });
+
+    if (statuses.length === 0) return;
+
+    let globalStatus: AgentStatus = AgentStatus.ACTIVE;
+    const report: Record<string, any> = {};
+
+    for (const s of statuses) {
+      report[s.clusterId] = { status: s.status, error: s.error };
+      if (s.status === 'FAILED') globalStatus = AgentStatus.FAILED;
+      else if (s.status === 'PENDING' && globalStatus !== 'FAILED') {
+        globalStatus = AgentStatus.PENDING;
+      }
     }
-    
-    return results;
+
+    await this.prisma.agent.update({
+      where: { id: agentId },
+      data: {
+        status: globalStatus,
+        registrationReport: report as Prisma.InputJsonValue
+      }
+    });
   }
 
   /**
@@ -306,6 +386,83 @@ export class AgentService {
       }, 'Failed to delete agent');
       throw new Error(`Failed to delete agent: ${error}`);
     }
+  }
+
+  /**
+   * Initiate a new agent execution.
+   */
+  async executeAgent(request: ExecutionRequest): Promise<Execution> {
+    const { agentId, organizationId, input, priority = 'normal' } = request;
+    const executionId = generateUUID();
+
+    try {
+      const agent = await this.prisma.agent.findUnique({
+        where: { id: agentId },
+        select: { retryPolicy: true, status: true }
+      });
+
+      if (!agent) throw new Error('Agent not found');
+      if (agent.status !== AgentStatus.ACTIVE) {
+        throw new Error(`Agent is not active (Status: ${agent.status})`);
+      }
+
+      const maxAttempts = (agent.retryPolicy as any)?.maxAttempts || 3;
+
+      const execution = await this.prisma.execution.create({
+        data: {
+          id: executionId,
+          agentId,
+          status: 'PENDING',
+          input: (input || {}) as Prisma.InputJsonValue,
+          priority: priority.toUpperCase() as any,
+          maxAttempts,
+        }
+      });
+
+      await inngest.send({
+        name: 'agent.execution.requested',
+        data: {
+          executionId,
+          agentId,
+          organizationId,
+          input,
+          priority,
+          requestedAt: new Date().toISOString(),
+        },
+      });
+
+      logger.info({ executionId, agentId, organizationId }, 'Execution initiated successfully');
+      return execution;
+    } catch (error) {
+      logger.error({ error, agentId, organizationId }, 'Failed to initiate execution');
+      throw error;
+    }
+  }
+
+  /**
+   * Get execution details by ID.
+   */
+  async getExecution(organizationId: string, executionId: string): Promise<Execution | null> {
+    const execution = await this.prisma.execution.findUnique({
+      where: { id: executionId },
+      include: { agent: { select: { organizationId: true } } }
+    });
+
+    if (!execution || execution.agent.organizationId !== organizationId) {
+      return null;
+    }
+
+    return execution;
+  }
+
+  /**
+   * Update execution status and result.
+   */
+  async updateExecution(executionId: string, data: any): Promise<Execution> {
+    return this.prisma.execution.update({
+      where: { id: executionId },
+      data,
+    });
   }
 
   /**

@@ -46,42 +46,47 @@ export const authInterceptor: grpc.Interceptor = ((options: any, nextCall: any) 
 
       // Validate credentials against database
       prismaManager.getClient().then(async (prisma) => {
-        // 1. Authenticate API Key first
-        const keyPrefix = apiKey.substring(0, 8);
-        const apiKeys = await prisma.apiKey.findMany({
-          where: { keyPrefix, revokedAt: null }
-        });
+        // CASE 1: Registration Flow (API Key)
+        if (isRegistering) {
+          const keyPrefix = apiKey!.substring(3, 11);
+          const apiKeys = await prisma.apiKey.findMany({
+            where: { keyPrefix, revokedAt: null }
+          });
 
-        let validKey = null;
-        for (const key of apiKeys) {
-          if (await verifySecret(apiKey, key.keyHash)) {
-            validKey = key;
-            break;
+          for (const key of apiKeys) {
+            if (await verifySecret(apiKey!, key.keyHash)) {
+              return { type: 'registration', organizationId: key.organizationId };
+            }
           }
-        }
-
-        if (!validKey) {
           throw new Error('Invalid API Key');
         }
 
-        // 2. For non-registration calls, ensure cluster exists and belongs to organization
-        if (!isRegistering) {
-          const cluster = await prisma.cluster.findFirst({
-            where: { id: clusterId, organizationId: validKey.organizationId },
-            select: { id: true, status: true }
-          });
-
-          if (!cluster) {
-            throw new Error(`Cluster ${clusterId} not found or access denied`);
-          }
+        // CASE 2: Operational Flow (Cluster Secret)
+        const clusterSecret = metadata.get('x-cluster-secret')[0] as string | undefined;
+        if (!clusterSecret || !clusterId) {
+          throw new Error('Missing cluster-id or x-cluster-secret');
         }
 
-        return { validKey };
+        const cluster = await prisma.cluster.findUnique({
+          where: { id: clusterId },
+          select: { secretHash: true, organizationId: true }
+        });
+
+        if (!cluster || !cluster.secretHash) {
+          throw new Error('Cluster not found or not initialized with secret');
+        }
+
+        if (await verifySecret(clusterSecret, cluster.secretHash)) {
+          return { type: 'stream', organizationId: cluster.organizationId };
+        }
+
+        throw new Error('Invalid Cluster Secret');
       })
-        .then(() => {
+        .then((auth) => {
           logger.info({
             methodPath,
-            clusterId
+            clusterId,
+            type: auth.type
           }, '[AuthInterceptor] Authentication successful');
 
           // Authentication successful - proceed with call

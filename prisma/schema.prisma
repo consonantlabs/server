@@ -165,11 +165,18 @@ model Agent {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // ARCHITECTURAL DESIGN: Granular Status Reporting
+  // We store a summary report of the agent's readiness across all clusters.
+  registrationReport Json?
+
   // Relations
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  cluster      Cluster?     @relation(fields: [clusterId], references: [id])
+  cluster      Cluster?     @relation(fields: [clusterId], references: [id], onDelete: SetNull)
   clusterId    String?      // Optional pinning to specific cluster
   executions   Execution[]
+
+  // Status per cluster (Many-to-Many via AgentClusterStatus)
+  clusterStatuses AgentClusterStatus[]
 
   @@unique([organizationId, name]) // Agent names must be unique per organization
   @@index([organizationId])        // Fast lookup of all agents for an organization
@@ -212,6 +219,10 @@ model Cluster {
   relayerVersion String?
   relayerConfig  Json?
 
+  // ARCHITECTURAL DESIGN: Cluster Secrets
+  // Secondary credential for gRPC communication, hashed with bcrypt.
+  secretHash     String?
+
   // gRPC stream tracking (ephemeral - not persisted to DB in production)
   // In production, this is tracked in memory by the gRPC server
   streamId         String?   // Internal ID for the active gRPC stream
@@ -229,6 +240,9 @@ model Cluster {
   metrics        Metric[]
   logs           Log[]
   events         Event[]
+
+  // Granular agent statuses for this cluster
+  agentStatuses  AgentClusterStatus[]
 
   @@unique([organizationId, name])
   @@index([organizationId])
@@ -509,4 +523,27 @@ model RequestLog {
   @@index([organizationId, timestamp(sort: Desc)])
   @@index([requestId])
   @@map("request_logs")
+}
+
+// ============================================================================
+// GRANULAR AGENT TRACKING
+// ============================================================================
+
+/// Tracks the status of an agent within a specific cluster.
+/// This enables "Global Agents" to report status independently per location.
+model AgentClusterStatus {
+  id        String   @id @default(uuid())
+  agentId   String
+  clusterId String
+  status    AgentStatus @default(PENDING)
+  error     String?
+  updatedAt DateTime @updatedAt
+
+  agent     Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  cluster   Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, clusterId])
+  @@index([agentId])
+  @@index([clusterId])
+  @@map("agent_cluster_statuses")
 }

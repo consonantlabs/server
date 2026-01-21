@@ -23,15 +23,28 @@ import { Redis } from 'ioredis';
 import { logger } from '../../utils/logger.js';
 
 /**
- * Work item that gets queued for execution.
- * Contains everything the relayer needs to create the Agent CRD.
+ * ARCHITECTURAL DESIGN: Work vs Registration payload separation.
+ * To optimize the hot path, execution events are kept "thin".
+ * High-volume configuration (registration) is handled as a separate lifecycle event.
+ */
+
+/**
+ * Lean work item for the execution hot path.
  */
 export interface WorkItem {
     executionId: string;
+    agentName: string;
+    input: Record<string, unknown>;
+    priority?: Priority;
+}
+
+/**
+ * Detailed registration item for configuring the edge environment.
+ */
+export interface RegistrationItem {
     agentId: string;
     agentName: string;
-    agentImage: string;
-    input: Record<string, unknown>;
+    image: string;
     resources: {
         cpu: string;
         memory: string;
@@ -47,7 +60,15 @@ export interface WorkItem {
     warmPoolSize: number;
     networkPolicy: string;
     environmentVariables?: Record<string, string>;
+    configHash: string;
 }
+
+/**
+ * Discriminated union for all messages pushed to the cluster relayer.
+ */
+export type QueueMessage =
+    | { type: 'WORK'; data: WorkItem }
+    | { type: 'REGISTRATION'; data: RegistrationItem };
 
 /**
  * Priority levels for execution queueing.
@@ -92,31 +113,29 @@ export class WorkQueueService {
     async enqueue(
         organizationId: string,
         clusterId: string,
-        work: WorkItem,
+        item: QueueMessage,
         priority: Priority = 'normal'
     ): Promise<void> {
         const queueKey = this.getQueueKey(clusterId, organizationId, priority);
-        const workJson = JSON.stringify(work);
+        const payloadJson = JSON.stringify(item);
 
         try {
-            // Push to the right side of the list (FIFO ordering)
-            await this.redis.rpush(queueKey, workJson);
+            await this.redis.rpush(queueKey, payloadJson);
 
             logger.info({
                 organizationId,
                 clusterId,
-                executionId: work.executionId,
+                type: item.type,
+                id: item.type === 'WORK' ? item.data.executionId : item.data.agentName,
                 priority,
-                queueLength: await this.getQueueLength(organizationId, clusterId, priority),
-            }, 'Work item queued');
+            }, 'Queue item pushed');
         } catch (error) {
             logger.error({
                 error,
                 organizationId,
                 clusterId,
-                executionId: work.executionId,
-            }, 'Failed to enqueue work item');
-            throw new Error(`Failed to queue work: ${error}`);
+            }, 'Failed to enqueue item');
+            throw new Error(`Failed to queue item: ${error}`);
         }
     }
 
@@ -147,7 +166,7 @@ export class WorkQueueService {
         organizationId: string,
         clusterId: string,
         timeoutSeconds: number = 30
-    ): Promise<WorkItem | null> {
+    ): Promise<QueueMessage | null> {
         // Build list of queues to check in priority order
         const queues = [
             this.getQueueKey(clusterId, organizationId, 'high'),
@@ -165,17 +184,17 @@ export class WorkQueueService {
                 return null;
             }
 
-            const [queueKey, workJson] = result;
-            const work = JSON.parse(workJson) as WorkItem;
+            const [queueKey, payloadJson] = result;
+            const message = JSON.parse(payloadJson) as QueueMessage;
 
             logger.info({
                 organizationId,
                 clusterId,
-                executionId: work.executionId,
+                type: message.type,
                 queueKey,
-            }, 'Work item dequeued');
+            }, 'Queue item dequeued');
 
-            return work;
+            return message;
         } catch (error) {
             logger.error({
                 error,
@@ -322,20 +341,22 @@ export class WorkQueueService {
         const stats = new Map();
 
         try {
-            // Find all cluster queue keys across all orgs
-            // Pattern: org:*:cluster:*:work*
+            // Find all cluster queue keys across all orgs using non-blocking SCAN
             const pattern = 'org:*:cluster:*:work*';
-            const keys = await this.redis.keys(pattern);
-
-            // Extract unique org:cluster pairs
             const targets = new Set<string>();
-            for (const key of keys) {
-                // Key format: org:{orgId}:cluster:{clusterId}:work...
-                const match = key.match(/^org:([^:]+):cluster:([^:]+):work/);
-                if (match) {
-                    targets.add(`${match[1]}:${match[2]}`);
+
+            let cursor = '0';
+            do {
+                const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+                cursor = nextCursor;
+
+                for (const key of keys) {
+                    const match = key.match(/^org:([^:]+):cluster:([^:]+):work/);
+                    if (match) {
+                        targets.add(`${match[1]}:${match[2]}`);
+                    }
                 }
-            }
+            } while (cursor !== '0');
 
             // Get stats for each target
             for (const target of targets) {
@@ -352,7 +373,7 @@ export class WorkQueueService {
                 });
             }
         } catch (error) {
-            logger.error({ error }, 'Failed to get global queue stats');
+            logger.error({ error }, 'Failed to get global queue stats via SCAN');
         }
 
         return stats;

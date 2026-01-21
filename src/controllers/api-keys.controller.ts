@@ -16,11 +16,8 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { generateSecureToken, hashSecret } from '@/utils/crypto.js';
-import { SECURITY } from '@/config/constants.js';
 import { logger } from '@/utils/logger.js';
-import { sendEvent } from '@/services/inngest/client.js';
-import { EVENT_TYPES, RATE_LIMITS } from '@/config/constants.js';
+import { getApiKeyService } from '@/services/api-key.service.js';
 
 /**
  * Request body for creating an API key.
@@ -74,83 +71,30 @@ export async function createApiKey(
   );
 
   try {
-    // Validate organization exists
-    const organization = await request.prisma.organization.findUnique({
-      where: { id: organizationId },
+    const service = getApiKeyService();
+    const { apiKey, record } = await service.createApiKey({
+      organizationId,
+      name,
+      expiresAt: expiresAt ? new Date(expiresAt) : undefined,
+      rateLimit,
     });
 
-    if (!organization) {
-      reply.code(404).send({
-        success: false,
-        error: 'Organization not found',
-      });
-      return;
-    }
-
-    // Generate secure API key
-    const apiKey = generateSecureToken(SECURITY.MIN_API_KEY_LENGTH);
-    logger.debug('Generated API key');
-
-    // Hash the key for storage
-    const keyHash = await hashSecret(apiKey);
-    logger.debug('Hashed API key');
-
-    // Store in database
-    const apiKeyRecord = await request.prisma.apiKey.create({
-      data: {
-        organizationId,
-        name,
-        keyHash,
-        keyPrefix: apiKey.substring(0, 8),
-        expiresAt: expiresAt ? new Date(expiresAt) : null,
-        rateLimit: rateLimit ?? RATE_LIMITS.API_KEY_DEFAULT,
-      },
-    });
-
-    logger.info(
-      {
-        keyId: apiKeyRecord.id,
-        organizationId,
-      },
-      'API key created successfully'
-    );
-
-    // Emit event for tracking/notifications
-    await sendEvent({
-      name: EVENT_TYPES.API_KEY_CREATED,
-      data: {
-        organizationId,
-        keyId: apiKeyRecord.id,
-        name,
-        timestamp: new Date().toISOString(),
-      },
-    });
-
-    // Return the plaintext key (ONLY TIME IT'S SHOWN)
     reply.code(201).send({
       success: true,
       data: {
-        id: apiKeyRecord.id,
-        name: apiKeyRecord.name,
-        key: apiKey, // ⚠️ PLAINTEXT - show only once
-        expiresAt: apiKeyRecord.expiresAt?.toISOString() || null,
-        createdAt: apiKeyRecord.createdAt.toISOString(),
+        id: record.id,
+        name: record.name,
+        key: apiKey,
+        expiresAt: record.expiresAt?.toISOString() || null,
+        createdAt: record.createdAt.toISOString(),
       },
       message: 'API key created. Save this key securely - it will not be shown again.',
     });
-  } catch (error) {
-    logger.error(
-      {
-        err: error,
-        organizationId,
-      },
-      'Failed to create API key'
-    );
-
-    reply.code(500).send({
+  } catch (error: any) {
+    const statusCode = error.message === 'Organization not found' ? 404 : 500;
+    reply.code(statusCode).send({
       success: false,
-      error: 'Failed to create API key',
-      message: error instanceof Error ? error.message : 'Unknown error',
+      error: error.message || 'Failed to create API key',
     });
   }
 }
@@ -179,32 +123,18 @@ export async function listApiKeys(
   );
 
   try {
-    const apiKeys = await request.prisma.apiKey.findMany({
-      where: {
-        organizationId,
-        revokedAt: null, // Only show active keys
-      },
-      select: {
-        id: true,
-        name: true,
-        lastUsedAt: true,
-        expiresAt: true,
-        rateLimit: true,
-        rateLimitUsed: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+    const service = getApiKeyService();
+    const apiKeys = await service.listApiKeys(organizationId);
 
     reply.send({
       success: true,
       data: apiKeys.map(key => ({
-        ...key,
+        id: key.id,
+        name: key.name,
         lastUsedAt: key.lastUsedAt?.toISOString() || null,
         expiresAt: key.expiresAt?.toISOString() || null,
+        rateLimit: key.rateLimit,
+        rateLimitUsed: key.rateLimitUsed,
         createdAt: key.createdAt.toISOString(),
         updatedAt: key.updatedAt.toISOString(),
       })),
@@ -213,14 +143,6 @@ export async function listApiKeys(
       },
     });
   } catch (error) {
-    logger.error(
-      {
-        err: error,
-        organizationId,
-      },
-      'Failed to list API keys'
-    );
-
     reply.code(500).send({
       success: false,
       error: 'Failed to list API keys',
@@ -259,78 +181,25 @@ export async function rotateApiKey(
   );
 
   try {
-    // Verify key exists
-    const existingKey = await request.prisma.apiKey.findFirst({
-      where: {
-        id: keyId,
-        organizationId,
-        revokedAt: null,
-      },
-    });
-
-    if (!existingKey) {
-      reply.code(404).send({
-        success: false,
-        error: 'API key not found',
-      });
-      return;
-    }
-
-    // Generate new key
-    const newApiKey = generateSecureToken(SECURITY.MIN_API_KEY_LENGTH);
-    const newKeyHash = await hashSecret(newApiKey);
-
-    // Update database
-    const updatedKey = await request.prisma.apiKey.update({
-      where: { id: keyId },
-      data: {
-        keyHash: newKeyHash,
-        updatedAt: new Date(),
-      },
-    });
-
-    logger.info(
-      {
-        keyId,
-        organizationId,
-      },
-      'API key rotated successfully'
-    );
-
-    // Emit rotation event
-    await sendEvent({
-      name: EVENT_TYPES.API_KEY_ROTATED,
-      data: {
-        organizationId,
-        keyId: keyId!,
-        timestamp: new Date().toISOString(),
-      },
-    });
+    const service = getApiKeyService();
+    const { apiKey, record } = await service.rotateApiKey(organizationId, keyId!);
 
     reply.send({
       success: true,
       data: {
-        id: updatedKey.id,
-        name: updatedKey.name,
-        key: newApiKey, // ⚠️ PLAINTEXT - show only once
-        expiresAt: updatedKey.expiresAt?.toISOString() || null,
-        updatedAt: updatedKey.updatedAt.toISOString(),
+        id: record.id,
+        name: record.name,
+        key: apiKey,
+        expiresAt: record.expiresAt?.toISOString() || null,
+        updatedAt: record.updatedAt.toISOString(),
       },
       message: 'API key rotated. Save this key securely - it will not be shown again.',
     });
-  } catch (error) {
-    logger.error(
-      {
-        err: error,
-        organizationId,
-        keyId,
-      },
-      'Failed to rotate API key'
-    );
-
-    reply.code(500).send({
+  } catch (error: any) {
+    const statusCode = error.message.includes('not found') ? 404 : 500;
+    reply.code(statusCode).send({
       success: false,
-      error: 'Failed to rotate API key',
+      error: error.message || 'Failed to rotate API key',
     });
   }
 }
@@ -361,66 +230,18 @@ export async function revokeApiKey(
   );
 
   try {
-    // Verify key exists
-    const existingKey = await request.prisma.apiKey.findFirst({
-      where: {
-        id: keyId,
-        organizationId,
-        revokedAt: null,
-      },
-    });
-
-    if (!existingKey) {
-      reply.code(404).send({
-        success: false,
-        error: 'API key not found',
-      });
-      return;
-    }
-
-    // Soft delete: set revokedAt
-    await request.prisma.apiKey.update({
-      where: { id: keyId },
-      data: {
-        revokedAt: new Date(),
-      },
-    });
-
-    logger.info(
-      {
-        keyId,
-        organizationId,
-      },
-      'API key revoked successfully'
-    );
-
-    // Emit revocation event
-    await sendEvent({
-      name: EVENT_TYPES.API_KEY_REVOKED,
-      data: {
-        organizationId,
-        keyId: keyId!,
-        timestamp: new Date().toISOString(),
-      },
-    });
+    const service = getApiKeyService();
+    await service.revokeApiKey(organizationId, keyId!);
 
     reply.send({
       success: true,
       message: 'API key revoked successfully',
     });
-  } catch (error) {
-    logger.error(
-      {
-        err: error,
-        organizationId,
-        keyId,
-      },
-      'Failed to revoke API key'
-    );
-
-    reply.code(500).send({
+  } catch (error: any) {
+    const statusCode = error.message.includes('not found') ? 404 : 500;
+    reply.code(statusCode).send({
       success: false,
-      error: 'Failed to revoke API key',
+      error: error.message || 'Failed to revoke API key',
     });
   }
 }

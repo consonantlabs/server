@@ -1,7 +1,11 @@
 /**
  * @fileoverview Main Server Entry Point
  * @module server
- * 
+ */
+
+import './instrumentation.js'; // MUST be first for OTEL
+
+/**
  * This is the main entry point for the Consonant Control Plane server.
  * It initializes and coordinates all services:
  * - Fastify HTTP server (REST API)
@@ -53,7 +57,16 @@ let grpcServer: any;
  */
 function createFastifyServer(): FastifyInstance {
   return Fastify({
-    logger,
+    logger: {
+      level: env.LOG_LEVEL,
+      serializers: {
+        err: (err: any) => ({
+          type: err.constructor.name,
+          message: err.message,
+          stack: err.stack,
+        })
+      }
+    },
     disableRequestLogging: false,
     trustProxy: true,
     requestIdHeader: 'x-request-id',
@@ -76,22 +89,10 @@ function createFastifyServer(): FastifyInstance {
  * 
  * This must run BEFORE any other imports to ensure all modules
  * are properly instrumented.
- * 
- * Note: In production, this would be in a separate file imported
- * at the very top of server.ts using --require or --import flag.
  */
 async function initializeOpenTelemetry(): Promise<void> {
-  if (!env.OTEL_ENABLED) {
-    logger.info('OpenTelemetry disabled');
-    return;
-  }
-
-  logger.info('Initializing OpenTelemetry...');
-
-  const { initializeOpenTelemetry: initOtel } = await import('./services/opentelemetry/tracer.js');
-  initOtel();
-
-  logger.info('OpenTelemetry initialized');
+  // Handled by instrumentation.ts at top of file
+  logger.info('OpenTelemetry initialized via bootstrap');
 }
 
 /**
@@ -105,9 +106,18 @@ async function initializeOpenTelemetry(): Promise<void> {
 async function initializeServices(app: FastifyInstance): Promise<void> {
   logger.info('Initializing services...');
 
-  // 1. Initialize database
-  await prismaManager.initialize(app.log);
-  logger.info('✓ Database initialized');
+  // 1. Initialize database (both operational and telemetry)
+  await prismaManager.initialize(app.log, {
+    databaseUrl: env.DATABASE_URL,
+    timescaleUrl: env.TIMESCALE_DB_URL,
+  });
+  
+  // Log database configuration status
+  if (prismaManager.hasSeparateTelemetryDB()) {
+    logger.info('✓ Dual database mode: Operational + TimescaleDB');
+  } else {
+    logger.info('✓ Single database mode: Shared operational + telemetry');
+  }
 
   // 2. Initialize Redis
   await redisClient.connect();
@@ -128,10 +138,10 @@ async function initializeServices(app: FastifyInstance): Promise<void> {
   initClusterService(await prismaManager.getClient());
   logger.info('✓ Cluster service initialized');
 
-  // 6. Initialize API Key Service
-  const { initApiKeyService } = await import('./services/api-key.service.js');
-  initApiKeyService(await prismaManager.getClient());
-  logger.info('✓ API Key Service initialized');
+  // 6. Initialize Telemetry Service
+  const { initTelemetryService } = await import('./services/telemetry.service.js');
+  initTelemetryService(await prismaManager.getTelemetryClient());
+  logger.info('✓ Telemetry service initialized');
 
   logger.info('✓ All services initialized');
 }
@@ -193,11 +203,23 @@ async function registerRoutes(app: FastifyInstance): Promise<void> {
       const client = await prismaManager.getClient();
       await client.$queryRaw`SELECT 1`;
 
+      const telemetryClient = await prismaManager.getTelemetryClient();
+      const telemetryHealthy = telemetryClient !== client 
+        ? await telemetryClient.$queryRaw`SELECT 1`.then(() => true).catch(() => false)
+        : true;
+
       return {
         status: 'healthy',
         database: {
-          connected: true,
-          url: prismaManager.getCurrentDatabaseUrl(),
+          operational: {
+            connected: true,
+            url: prismaManager.getCurrentDatabaseUrl(),
+          },
+          telemetry: {
+            connected: telemetryHealthy,
+            url: prismaManager.getCurrentTimescaleUrl() || 'shared',
+            separate: prismaManager.hasSeparateTelemetryDB(),
+          },
         },
         timestamp: new Date().toISOString(),
       };
@@ -205,8 +227,10 @@ async function registerRoutes(app: FastifyInstance): Promise<void> {
       return {
         status: 'unhealthy',
         database: {
-          connected: false,
-          error: error instanceof Error ? error.message : 'Unknown error',
+          operational: {
+            connected: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          },
         },
         timestamp: new Date().toISOString(),
       };
@@ -285,7 +309,6 @@ function setupResponseLogging(app: FastifyInstance): void {
       url: request.url,
       statusCode: reply.statusCode,
       durationMs: duration.toFixed(2),
-      // Context is automatically injected by logger mixin
     }, 'Request completed');
 
     done();
@@ -328,7 +351,7 @@ function setupErrorHandler(app: FastifyInstance): void {
  * Shutdown sequence:
  * 1. Stop accepting new requests (close servers)
  * 2. Wait for active requests to complete
- * 3. Close database connections
+ * 3. Close database connections (both operational and telemetry)
  * 4. Close Redis connections
  * 5. Flush logs
  * 6. Exit process
@@ -356,17 +379,17 @@ function setupGracefulShutdown(app: FastifyInstance): void {
         logger.info('✓ gRPC server closed');
       }
 
-      // 2. Disconnect Redis
+      // 3. Disconnect Redis
       logger.info('Disconnecting Redis...');
       await redisClient.disconnect();
       logger.info('✓ Redis disconnected');
 
-      // 3. Disconnect database (waits for active requests)
-      logger.info('Disconnecting database...');
+      // 4. Disconnect all database clients (operational + telemetry)
+      logger.info('Disconnecting databases...');
       await prismaManager.disconnect();
-      logger.info('✓ Database disconnected');
+      logger.info('✓ All databases disconnected');
 
-      // 4. Flush logs
+      // 5. Flush logs
       logger.info('Flushing logs...');
       await flushLogger();
       logger.info('✓ Logs flushed');
@@ -410,11 +433,16 @@ export async function buildApp(): Promise<FastifyInstance> {
 export async function start(): Promise<void> {
   try {
     logger.info('🚀 Starting Consonant Control Plane...');
+    logger.info(`Environment: ${env.NODE_ENV}`);
+    logger.info(`Log Level: ${env.LOG_LEVEL}`);
+    
     const app = await buildApp();
 
+    // Start gRPC server
     grpcServer = await startGrpcServer(env.GRPC_PORT, env.REDIS_URL);
     logger.info(`✓ gRPC server listening on ${env.GRPC_HOST}:${env.GRPC_PORT}`);
 
+    // Start HTTP server
     await app.listen({
       port: env.PORT,
       host: env.HOST,
@@ -422,6 +450,15 @@ export async function start(): Promise<void> {
 
     logger.info(`✓ HTTP server listening on http://${env.HOST}:${env.PORT}`);
     logger.info('🎉 Server started successfully');
+    
+    // Log database configuration
+    logger.info(`Database Configuration:`);
+    logger.info(`  Operational: ${prismaManager.getCurrentDatabaseUrl()?.replace(/:[^:@]*@/, ':****@')}`);
+    if (prismaManager.hasSeparateTelemetryDB()) {
+      logger.info(`  Telemetry: ${prismaManager.getCurrentTimescaleUrl()?.replace(/:[^:@]*@/, ':****@')}`);
+    } else {
+      logger.info(`  Telemetry: Shared with operational`);
+    }
   } catch (error) {
     logger.fatal({ err: error }, 'Failed to start server');
     process.exit(1);
